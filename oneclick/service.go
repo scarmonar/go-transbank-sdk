@@ -12,7 +12,18 @@ import (
 	"time"
 )
 
-// OneclickService provides methods to interact with Transbank Oneclick API.
+const (
+	maxUsernameLength          = 40
+	maxEmailLength             = 100
+	maxResponseURLLength       = 255
+	maxBuyOrderLength          = 26
+	maxTbkUserLength           = 40
+	maxCommerceCodeLength      = 12
+	maxAuthorizationCodeLength = 6
+	maxInstallmentsNumber      = 99
+)
+
+// OneclickService provides methods to interact with the Transbank Oneclick API.
 type OneclickService struct {
 	commerceCode string
 	apiSecret    string
@@ -21,71 +32,75 @@ type OneclickService struct {
 }
 
 // NewOneclickService creates a new Transbank Oneclick service.
-// commerceCode: parent commerce code (e.g., "597055555541")
+// commerceCode: parent commerce code (for example: "597055555541")
 // apiSecret: API secret key for authentication
 // baseURL: API base URL (integration or production)
-// httpClient: HTTP client to use for requests (if nil, creates a new one with 20s timeout)
+// httpClient: HTTP client to use for requests (if nil, a client with 30s timeout is used)
 func NewOneclickService(commerceCode, apiSecret, baseURL string, httpClient *http.Client) (*OneclickService, error) {
-	if strings.TrimSpace(commerceCode) == "" {
-		return nil, ErrInvalidCommerceCode
+	if err := validateCommerceCode(commerceCode); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(apiSecret) == "" {
 		return nil, ErrInvalidAPISecret
 	}
-	if strings.TrimSpace(baseURL) == "" {
+
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
 		return nil, ErrInvalidBaseURL
 	}
 
-	// Validate and parse baseURL
-	if _, err := url.Parse(baseURL); err != nil {
+	u, err := url.Parse(baseURL)
+	if err != nil {
 		return nil, fmt.Errorf("parse base URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("base URL must be absolute: %w", ErrInvalidBaseURL)
 	}
 
 	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
-		}
+		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 
 	return &OneclickService{
 		commerceCode: strings.TrimSpace(commerceCode),
 		apiSecret:    strings.TrimSpace(apiSecret),
-		baseURL:      strings.TrimSuffix(strings.TrimSpace(baseURL), "/"),
+		baseURL:      strings.TrimSuffix(baseURL, "/"),
 		httpClient:   httpClient,
 	}, nil
 }
 
-// CommerceCode returns the commerce code.
+// CommerceCode returns the configured commerce code.
 func (s *OneclickService) CommerceCode() string {
 	return s.commerceCode
 }
 
-// IsIntegrationEnvironment returns true if the service is configured for integration (test) environment.
+// IsIntegrationEnvironment returns true if the service appears configured for integration.
 func (s *OneclickService) IsIntegrationEnvironment() bool {
-	return strings.Contains(s.baseURL, "int") || strings.Contains(s.baseURL, "test") || strings.Contains(s.baseURL, "integration")
+	base := strings.ToLower(s.baseURL)
+	return strings.Contains(base, "int") || strings.Contains(base, "test") || strings.Contains(base, "integration")
 }
 
-// IsProduction returns true if the service is configured for production environment.
+// IsProduction returns true if the service appears configured for production.
 func (s *OneclickService) IsProduction() bool {
 	return !s.IsIntegrationEnvironment()
 }
 
-// CreateInscription initiates a new card inscription. Returns the token and redirect URL.
-func (s *OneclickService) CreateInscription(ctx context.Context, username, email, responseURL string) (*InscriptionResponse, error) {
-	if strings.TrimSpace(username) == "" {
-		return nil, ErrInvalidUsername
+// Start initiates a new inscription and returns token + Webpay redirect URL.
+func (s *OneclickService) Start(ctx context.Context, username, email, responseURL string) (*InscriptionResponse, error) {
+	if err := validateUsername(username); err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(email) == "" {
-		return nil, ErrInvalidEmail
+	if err := validateEmail(email); err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(responseURL) == "" {
-		return nil, ErrEmptyResponseURL
+	if err := validateResponseURL(responseURL); err != nil {
+		return nil, err
 	}
 
 	req := &InscriptionRequest{
-		Username:    username,
-		Email:       email,
-		ResponseURL: responseURL,
+		Username:    strings.TrimSpace(username),
+		Email:       strings.TrimSpace(email),
+		ResponseURL: strings.TrimSpace(responseURL),
 	}
 
 	var resp InscriptionResponse
@@ -96,80 +111,66 @@ func (s *OneclickService) CreateInscription(ctx context.Context, username, email
 	return &resp, nil
 }
 
-// ConfirmInscription completes the card inscription process using the token from the redirect.
-func (s *OneclickService) ConfirmInscription(ctx context.Context, token string) (*InscriptionConfirmResponse, error) {
-	if strings.TrimSpace(token) == "" {
+// Finish confirms an inscription using the token returned to the commerce callback URL.
+func (s *OneclickService) Finish(ctx context.Context, token string) (*InscriptionConfirmResponse, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
 		return nil, ErrInvalidToken
 	}
 
 	endpoint := fmt.Sprintf("/inscriptions/%s", url.PathEscape(token))
 	var resp InscriptionConfirmResponse
-	if err := s.doRequest(ctx, http.MethodPut, endpoint, nil, &resp); err != nil {
+	// Transbank requires an explicit empty JSON body for this endpoint.
+	if err := s.doRequest(ctx, http.MethodPut, endpoint, struct{}{}, &resp); err != nil {
 		return nil, err
 	}
 
-	if resp.ResponseCode != 0 {
+	if resp.ResponseCode != ResponseCodeSuccess {
 		return nil, NewTransbankError(resp.ResponseCode, "inscription confirmation failed", nil)
 	}
 
 	return &resp, nil
 }
 
-// DeleteInscription deletes/cancels an existing inscription.
-func (s *OneclickService) DeleteInscription(ctx context.Context, tbkUser, username string) error {
-	if strings.TrimSpace(tbkUser) == "" {
-		return ErrInvalidTbkUser
+// Remove deletes an existing inscription.
+func (s *OneclickService) Remove(ctx context.Context, tbkUser, username string) error {
+	if err := validateTbkUser(tbkUser); err != nil {
+		return err
 	}
-	if strings.TrimSpace(username) == "" {
-		return ErrInvalidUsername
+	if err := validateUsername(username); err != nil {
+		return err
 	}
 
 	req := &DeleteInscriptionRequest{
-		TbkUser:  tbkUser,
-		Username: username,
+		TbkUser:  strings.TrimSpace(tbkUser),
+		Username: strings.TrimSpace(username),
 	}
 
-	// DELETE returns 204 No Content with empty body
-	err := s.doRequestRaw(ctx, http.MethodDelete, "/inscriptions", req, nil)
-	return err
+	return s.doRequestRaw(ctx, http.MethodDelete, "/inscriptions", req)
 }
 
-// AuthorizeTransaction authorizes a transaction on a registered card.
-func (s *OneclickService) AuthorizeTransaction(ctx context.Context, username, tbkUser, buyOrder string, details []TransactionDetail) (*AuthorizeTransactionResponse, error) {
-	if strings.TrimSpace(username) == "" {
-		return nil, ErrInvalidUsername
+// Authorize authorizes one or many child transactions for an enrolled user.
+func (s *OneclickService) Authorize(ctx context.Context, username, tbkUser, buyOrder string, details []TransactionDetail) (*AuthorizeTransactionResponse, error) {
+	if err := validateUsername(username); err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(tbkUser) == "" {
-		return nil, ErrInvalidTbkUser
+	if err := validateTbkUser(tbkUser); err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(buyOrder) == "" {
-		return nil, ErrInvalidBuyOrder
-	}
-	if len(details) == 0 {
-		return nil, ErrMissingDetails
+	if err := validateBuyOrder(buyOrder); err != nil {
+		return nil, err
 	}
 
-	// Validate transaction details
-	for _, d := range details {
-		if strings.TrimSpace(d.CommerceCode) == "" {
-			return nil, fmt.Errorf("transaction detail: %w", ErrInvalidCommerceCode)
-		}
-		if strings.TrimSpace(d.BuyOrder) == "" {
-			return nil, fmt.Errorf("transaction detail: %w", ErrInvalidBuyOrder)
-		}
-		if d.Amount <= 0 {
-			return nil, fmt.Errorf("transaction detail: %w", ErrInvalidAmount)
-		}
-		if d.InstallmentsNumber < 1 {
-			d.InstallmentsNumber = 1
-		}
+	normalizedDetails, err := normalizeAndValidateDetails(details)
+	if err != nil {
+		return nil, err
 	}
 
 	req := &AuthorizeTransactionRequest{
-		Username: username,
-		TbkUser:  tbkUser,
-		BuyOrder: buyOrder,
-		Details:  details,
+		Username: strings.TrimSpace(username),
+		TbkUser:  strings.TrimSpace(tbkUser),
+		BuyOrder: strings.TrimSpace(buyOrder),
+		Details:  normalizedDetails,
 	}
 
 	var resp AuthorizeTransactionResponse
@@ -180,13 +181,13 @@ func (s *OneclickService) AuthorizeTransaction(ctx context.Context, username, tb
 	return &resp, nil
 }
 
-// GetTransactionStatus retrieves the status of a transaction.
-func (s *OneclickService) GetTransactionStatus(ctx context.Context, buyOrder string) (*AuthorizeTransactionResponse, error) {
-	if strings.TrimSpace(buyOrder) == "" {
-		return nil, ErrInvalidBuyOrder
+// Status retrieves the status of a previously authorized transaction.
+func (s *OneclickService) Status(ctx context.Context, buyOrder string) (*AuthorizeTransactionResponse, error) {
+	if err := validateBuyOrder(buyOrder); err != nil {
+		return nil, err
 	}
 
-	endpoint := fmt.Sprintf("/transactions/%s", url.QueryEscape(buyOrder))
+	endpoint := fmt.Sprintf("/transactions/%s", url.PathEscape(strings.TrimSpace(buyOrder)))
 	var resp AuthorizeTransactionResponse
 	if err := s.doRequest(ctx, http.MethodGet, endpoint, nil, &resp); err != nil {
 		return nil, err
@@ -195,30 +196,60 @@ func (s *OneclickService) GetTransactionStatus(ctx context.Context, buyOrder str
 	return &resp, nil
 }
 
-// ReverseTransaction reverses/refunds a transaction.
-func (s *OneclickService) ReverseTransaction(ctx context.Context, buyOrder, commerceCode, detailBuyOrder string, amount int) (*RefundResponse, error) {
-	if strings.TrimSpace(buyOrder) == "" {
-		return nil, ErrInvalidBuyOrder
+// Refund reverses or nullifies a previously authorized transaction.
+func (s *OneclickService) Refund(ctx context.Context, buyOrder, commerceCode, detailBuyOrder string, amount int) (*RefundResponse, error) {
+	if err := validateBuyOrder(buyOrder); err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(commerceCode) == "" {
-		return nil, ErrInvalidCommerceCode
+	if err := validateCommerceCode(commerceCode); err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(detailBuyOrder) == "" {
-		return nil, ErrInvalidBuyOrder
+	if err := validateBuyOrder(detailBuyOrder); err != nil {
+		return nil, err
 	}
 	if amount <= 0 {
 		return nil, ErrInvalidAmount
 	}
 
 	req := &RefundRequest{
-		CommerceCode:   commerceCode,
-		DetailBuyOrder: detailBuyOrder,
+		CommerceCode:   strings.TrimSpace(commerceCode),
+		DetailBuyOrder: strings.TrimSpace(detailBuyOrder),
 		Amount:         amount,
 	}
 
-	endpoint := fmt.Sprintf("/transactions/%s/refunds", url.QueryEscape(buyOrder))
+	endpoint := fmt.Sprintf("/transactions/%s/refunds", url.PathEscape(strings.TrimSpace(buyOrder)))
 	var resp RefundResponse
 	if err := s.doRequest(ctx, http.MethodPost, endpoint, req, &resp); err != nil {
+		return nil, err
+	}
+
+	return &resp, nil
+}
+
+// Capture performs a deferred capture for a previously authorized child transaction.
+func (s *OneclickService) Capture(ctx context.Context, commerceCode, buyOrder, authorizationCode string, captureAmount int) (*CaptureResponse, error) {
+	if err := validateCommerceCode(commerceCode); err != nil {
+		return nil, err
+	}
+	if err := validateBuyOrder(buyOrder); err != nil {
+		return nil, err
+	}
+	if err := validateAuthorizationCode(authorizationCode); err != nil {
+		return nil, err
+	}
+	if captureAmount <= 0 {
+		return nil, ErrInvalidCaptureAmount
+	}
+
+	req := &CaptureRequest{
+		CommerceCode:      strings.TrimSpace(commerceCode),
+		BuyOrder:          strings.TrimSpace(buyOrder),
+		CaptureAmount:     captureAmount,
+		AuthorizationCode: strings.TrimSpace(authorizationCode),
+	}
+
+	var resp CaptureResponse
+	if err := s.doRequest(ctx, http.MethodPut, "/transactions/capture", req, &resp); err != nil {
 		return nil, err
 	}
 
@@ -238,18 +269,15 @@ func (s *OneclickService) doRequest(ctx context.Context, method, path string, bo
 	}
 	defer resp.Body.Close()
 
-	// Read response body
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("read response body: %w", err)
 	}
 
-	// Handle HTTP error status codes
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return s.parseErrorResponse(resp.StatusCode, respBody)
 	}
 
-	// Only decode if there's a target and a body
 	if respTarget != nil && len(respBody) > 0 {
 		if err := json.Unmarshal(respBody, respTarget); err != nil {
 			return fmt.Errorf("unmarshal response: %w", err)
@@ -259,8 +287,8 @@ func (s *OneclickService) doRequest(ctx context.Context, method, path string, bo
 	return nil
 }
 
-// doRequestRaw makes an HTTP request without expecting a JSON response body (e.g., DELETE with 204).
-func (s *OneclickService) doRequestRaw(ctx context.Context, method, path string, body interface{}, respTarget interface{}) error {
+// doRequestRaw makes an HTTP request without expecting a JSON response body.
+func (s *OneclickService) doRequestRaw(ctx context.Context, method, path string, body interface{}) error {
 	req, err := s.buildRequest(ctx, method, path, body)
 	if err != nil {
 		return err
@@ -277,7 +305,6 @@ func (s *OneclickService) doRequestRaw(ctx context.Context, method, path string,
 		return fmt.Errorf("read response body: %w", err)
 	}
 
-	// Handle HTTP error status codes
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return s.parseErrorResponse(resp.StatusCode, respBody)
 	}
@@ -287,7 +314,7 @@ func (s *OneclickService) doRequestRaw(ctx context.Context, method, path string,
 
 // buildRequest constructs an HTTP request with proper headers and authentication.
 func (s *OneclickService) buildRequest(ctx context.Context, method, path string, body interface{}) (*http.Request, error) {
-	url := s.baseURL + path
+	requestURL := s.baseURL + path
 	var reqBody io.Reader
 
 	if body != nil {
@@ -298,49 +325,199 @@ func (s *OneclickService) buildRequest(ctx context.Context, method, path string,
 		reqBody = bytes.NewReader(bodyBytes)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	// Set authentication headers
 	req.Header.Set("Tbk-Api-Key-Id", s.commerceCode)
-	req.Header.Set("Tbk-Api-Key-Secret", s.computeSignature())
+	req.Header.Set("Tbk-Api-Key-Secret", s.apiKeySecret())
 	req.Header.Set("Content-Type", "application/json")
 
 	return req, nil
 }
 
-// computeSignature computes the HMAC-SHA256 signature for Transbank authentication.
-// Transbank uses: base64(sha256(concatenation of method, path, body, timestamp, apiSecret))
-func (s *OneclickService) computeSignature() string {
-	// For simplicity and based on Transbank's latest Oneclick API (v1.2),
-	// the signature is computed as: Hmac-SHA256(apiSecret)
-	// The signature header value is the hex-encoded HMAC.
-	// However, per Transbank docs, Oneclick v1.2 might not require signature on all endpoints.
-	// This is a placeholder that can be adjusted based on actual Transbank requirements.
-
-	// For now, return the API secret directly (Transbank may validate differently per endpoint)
+func (s *OneclickService) apiKeySecret() string {
+	// For Oneclick v1.2, this header is the configured API secret.
 	return s.apiSecret
 }
 
 // parseErrorResponse parses an error response from Transbank.
 func (s *OneclickService) parseErrorResponse(statusCode int, respBody []byte) error {
-	// Attempt to unmarshal as a Transbank error response
 	var errorResp struct {
-		ResponseCode int    `json:"response_code"`
+		ResponseCode *int   `json:"response_code"`
 		Error        string `json:"error"`
 		Message      string `json:"message"`
+		ErrorMessage string `json:"error_message"`
 	}
 
-	if err := json.Unmarshal(respBody, &errorResp); err == nil && errorResp.ResponseCode != 0 {
-		return NewTransbankError(errorResp.ResponseCode, errorResp.Message, fmt.Errorf("http %d", statusCode))
+	if err := json.Unmarshal(respBody, &errorResp); err == nil {
+		msg := firstNonEmpty(errorResp.ErrorMessage, errorResp.Message, errorResp.Error)
+		if errorResp.ResponseCode != nil {
+			if msg == "" {
+				msg = http.StatusText(statusCode)
+			}
+			return NewTransbankErrorWithDetails(*errorResp.ResponseCode, msg, string(respBody), fmt.Errorf("http %d", statusCode))
+		}
+		if msg != "" {
+			return NewTransbankErrorWithDetails(statusCode, msg, string(respBody), fmt.Errorf("http %d", statusCode))
+		}
 	}
 
-	// If it looks like a JSON response but doesn't match expected format, return it as-is
 	if len(respBody) > 0 {
 		return fmt.Errorf("transbank API error (HTTP %d): %s", statusCode, string(respBody))
 	}
 
 	return fmt.Errorf("transbank API error HTTP %d", statusCode)
+}
+
+func normalizeAndValidateDetails(details []TransactionDetail) ([]TransactionDetail, error) {
+	if len(details) == 0 {
+		return nil, ErrMissingDetails
+	}
+
+	normalized := make([]TransactionDetail, len(details))
+	for i, detail := range details {
+		if err := validateCommerceCode(detail.CommerceCode); err != nil {
+			return nil, fmt.Errorf("transaction detail %d: %w", i, err)
+		}
+		if err := validateBuyOrder(detail.BuyOrder); err != nil {
+			return nil, fmt.Errorf("transaction detail %d: %w", i, err)
+		}
+		if detail.Amount <= 0 {
+			return nil, fmt.Errorf("transaction detail %d: %w", i, ErrInvalidAmount)
+		}
+		if detail.InstallmentsNumber > maxInstallmentsNumber {
+			return nil, fmt.Errorf("transaction detail %d: %w", i, ErrInvalidInstallments)
+		}
+
+		if detail.InstallmentsNumber < 0 {
+			detail.InstallmentsNumber = 0
+		}
+		normalized[i] = TransactionDetail{
+			CommerceCode:       strings.TrimSpace(detail.CommerceCode),
+			BuyOrder:           strings.TrimSpace(detail.BuyOrder),
+			Amount:             detail.Amount,
+			InstallmentsNumber: detail.InstallmentsNumber,
+		}
+	}
+
+	return normalized, nil
+}
+
+func validateUsername(username string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return ErrInvalidUsername
+	}
+	if len(username) > maxUsernameLength {
+		return fmt.Errorf("username: %w", ErrMaxLengthExceeded)
+	}
+	return nil
+}
+
+func validateEmail(email string) error {
+	email = strings.TrimSpace(email)
+	if email == "" || !strings.Contains(email, "@") {
+		return ErrInvalidEmail
+	}
+	if len(email) > maxEmailLength {
+		return fmt.Errorf("email: %w", ErrMaxLengthExceeded)
+	}
+	return nil
+}
+
+func validateResponseURL(responseURL string) error {
+	responseURL = strings.TrimSpace(responseURL)
+	if responseURL == "" {
+		return ErrEmptyResponseURL
+	}
+	if len(responseURL) > maxResponseURLLength {
+		return fmt.Errorf("response_url: %w", ErrMaxLengthExceeded)
+	}
+
+	u, err := url.Parse(responseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ErrEmptyResponseURL
+	}
+
+	return nil
+}
+
+func validateTbkUser(tbkUser string) error {
+	tbkUser = strings.TrimSpace(tbkUser)
+	if tbkUser == "" {
+		return ErrInvalidTbkUser
+	}
+	if len(tbkUser) > maxTbkUserLength {
+		return fmt.Errorf("tbk_user: %w", ErrMaxLengthExceeded)
+	}
+	return nil
+}
+
+func validateCommerceCode(commerceCode string) error {
+	commerceCode = strings.TrimSpace(commerceCode)
+	if commerceCode == "" {
+		return ErrInvalidCommerceCode
+	}
+	if len(commerceCode) > maxCommerceCodeLength {
+		return fmt.Errorf("commerce_code: %w", ErrMaxLengthExceeded)
+	}
+	return nil
+}
+
+func validateAuthorizationCode(code string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return ErrInvalidAuthCode
+	}
+	if len(code) > maxAuthorizationCodeLength {
+		return fmt.Errorf("authorization_code: %w", ErrMaxLengthExceeded)
+	}
+	return nil
+}
+
+func validateBuyOrder(buyOrder string) error {
+	buyOrder = strings.TrimSpace(buyOrder)
+	if buyOrder == "" {
+		return ErrInvalidBuyOrder
+	}
+	if len(buyOrder) > maxBuyOrderLength {
+		return fmt.Errorf("buy_order: %w", ErrMaxLengthExceeded)
+	}
+	if !isValidBuyOrder(buyOrder) {
+		return ErrInvalidBuyOrderFmt
+	}
+	return nil
+}
+
+func isValidBuyOrder(v string) bool {
+	const allowedSymbols = "|_=&%.,~:/?[+!@()>-"
+
+	for _, r := range v {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if strings.ContainsRune(allowedSymbols, r) {
+			continue
+		}
+		return false
+	}
+
+	return true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

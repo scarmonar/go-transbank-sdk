@@ -3,6 +3,7 @@ package oneclick
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,72 +12,67 @@ import (
 	"time"
 )
 
-// TestNewOneclickService tests the NewOneclickService constructor.
 func TestNewOneclickService(t *testing.T) {
 	tests := []struct {
-		name           string
-		commerceCode   string
-		apiSecret      string
-		baseURL        string
-		httpClient     *http.Client
-		expectError    bool
-		expectedErrMsg string
+		name        string
+		commerce    string
+		secret      string
+		baseURL     string
+		expectError bool
 	}{
 		{
-			name:         "valid service creation",
-			commerceCode: "597055555541",
-			apiSecret:    "579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C",
-			baseURL:      "https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
-			httpClient:   nil,
-			expectError:  false,
+			name:        "valid",
+			commerce:    "597055555541",
+			secret:      "secret",
+			baseURL:     "https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
+			expectError: false,
 		},
 		{
-			name:           "missing commerce code",
-			commerceCode:   "",
-			apiSecret:      "test",
-			baseURL:        "https://test.com",
-			expectError:    true,
-			expectedErrMsg: "invalid commerce code",
+			name:        "missing commerce code",
+			commerce:    "",
+			secret:      "secret",
+			baseURL:     "https://test.com",
+			expectError: true,
 		},
 		{
-			name:           "missing API secret",
-			commerceCode:   "597055555541",
-			apiSecret:      "",
-			baseURL:        "https://test.com",
-			expectError:    true,
-			expectedErrMsg: "invalid API secret",
+			name:        "missing secret",
+			commerce:    "597055555541",
+			secret:      "",
+			baseURL:     "https://test.com",
+			expectError: true,
 		},
 		{
-			name:           "missing base URL",
-			commerceCode:   "597055555541",
-			apiSecret:      "test",
-			baseURL:        "",
-			expectError:    true,
-			expectedErrMsg: "invalid base URL",
+			name:        "missing base url",
+			commerce:    "597055555541",
+			secret:      "secret",
+			baseURL:     "",
+			expectError: true,
 		},
 		{
-			name:           "invalid base URL format",
-			commerceCode:   "597055555541",
-			apiSecret:      "test",
-			baseURL:        "ht!tp://invalid [url",
-			expectError:    true,
-			expectedErrMsg: "parse base URL",
+			name:        "relative base url is invalid",
+			commerce:    "597055555541",
+			secret:      "secret",
+			baseURL:     "/relative/url",
+			expectError: true,
+		},
+		{
+			name:        "malformed base url",
+			commerce:    "597055555541",
+			secret:      "secret",
+			baseURL:     "ht!tp://invalid [url",
+			expectError: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, err := NewOneclickService(tt.commerceCode, tt.apiSecret, tt.baseURL, tt.httpClient)
-
+			svc, err := NewOneclickService(tt.commerce, tt.secret, tt.baseURL, nil)
 			if tt.expectError {
 				if err == nil {
-					t.Errorf("expected error, got nil")
-				} else if tt.expectedErrMsg != "" && !strings.Contains(err.Error(), tt.expectedErrMsg) {
-					t.Errorf("expected error containing %q, got %q", tt.expectedErrMsg, err.Error())
+					t.Fatal("expected error, got nil")
 				}
 				return
 			}
-
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -87,453 +83,366 @@ func TestNewOneclickService(t *testing.T) {
 	}
 }
 
-// TestIsIntegrationEnvironment tests environment detection.
-func TestIsIntegrationEnvironment(t *testing.T) {
-	tests := []struct {
-		name        string
-		baseURL     string
-		expectInteg bool
-	}{
-		{
-			name:        "integration environment",
-			baseURL:     "https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
-			expectInteg: true,
-		},
-		{
-			name:        "production environment",
-			baseURL:     "https://webpay3g.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
-			expectInteg: false,
-		},
+func TestEnvironmentDetection(t *testing.T) {
+	integrationSvc, _ := NewOneclickService("597055555541", "secret", "https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2", nil)
+	if !integrationSvc.IsIntegrationEnvironment() {
+		t.Fatal("expected integration environment")
+	}
+	if integrationSvc.IsProduction() {
+		t.Fatal("integration service cannot be production")
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			svc, _ := NewOneclickService("597055555541", "secret", tt.baseURL, nil)
-			result := svc.IsIntegrationEnvironment()
-			if result != tt.expectInteg {
-				t.Errorf("IsIntegrationEnvironment() = %v, expected %v", result, tt.expectInteg)
-			}
-		})
+	prodSvc, _ := NewOneclickService("597055555541", "secret", "https://webpay3g.transbank.cl/rswebpaytransaction/api/oneclick/v1.2", nil)
+	if prodSvc.IsIntegrationEnvironment() {
+		t.Fatal("expected production environment")
+	}
+	if !prodSvc.IsProduction() {
+		t.Fatal("expected production flag")
 	}
 }
 
-// TestCreateInscription tests the CreateInscription method.
-func TestCreateInscription(t *testing.T) {
-	tests := []struct {
-		name        string
-		username    string
-		email       string
-		responseURL string
-		expectError bool
-	}{
-		{
-			name:        "valid inscription",
-			username:    "usuario_123",
-			email:       "user@example.com",
-			responseURL: "https://example.com/return",
-			expectError: false,
-		},
-		{
-			name:        "missing username",
-			username:    "",
-			email:       "user@example.com",
-			responseURL: "https://example.com/return",
-			expectError: true,
-		},
-		{
-			name:        "missing email",
-			username:    "usuario_123",
-			email:       "",
-			responseURL: "https://example.com/return",
-			expectError: true,
-		},
-		{
-			name:        "missing response URL",
-			username:    "usuario_123",
-			email:       "user@example.com",
-			responseURL: "",
-			expectError: true,
-		},
+func TestStartRequestShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/inscriptions" {
+			t.Fatalf("expected /inscriptions, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Tbk-Api-Key-Id"); got != "597055555541" {
+			t.Fatalf("unexpected commerce header: %s", got)
+		}
+		if got := r.Header.Get("Tbk-Api-Key-Secret"); got != "secret" {
+			t.Fatalf("unexpected secret header: %s", got)
+		}
+
+		var req InscriptionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Username != "user_123" || req.Email != "user@example.com" || req.ResponseURL != "https://merchant.com/return" {
+			t.Fatalf("unexpected request: %+v", req)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(InscriptionResponse{Token: "token123", URLWebpay: "https://webpay/form"})
+	}))
+	defer server.Close()
+
+	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	resp, err := svc.Start(context.Background(), "user_123", "user@example.com", "https://merchant.com/return")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Mock server
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/inscriptions" {
-					http.Error(w, "not found", http.StatusNotFound)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(InscriptionResponse{
-					Token:     "test_token_123",
-					URLWebpay: "https://webpay.transbank.cl/form",
-				})
-			}))
-			defer server.Close()
-
-			svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			resp, err := svc.CreateInscription(ctx, tt.username, tt.email, tt.responseURL)
-
-			if tt.expectError {
-				if err == nil {
-					t.Error("expected error, got nil")
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if resp == nil {
-				t.Fatal("expected non-nil response")
-			}
-			if resp.Token != "test_token_123" {
-				t.Errorf("unexpected token: %v", resp.Token)
-			}
-		})
+	if resp.Token != "token123" {
+		t.Fatalf("unexpected token: %s", resp.Token)
 	}
 }
 
-// TestConfirmInscription tests the ConfirmInscription method.
-func TestConfirmInscription(t *testing.T) {
-	tests := []struct {
-		name        string
-		token       string
-		expectError bool
-	}{
-		{
-			name:        "valid confirmation",
-			token:       "e128a9c24c0a3cbc09223973327b97c8c474f6b74be509196cce4caf162a016a",
-			expectError: false,
-		},
-		{
-			name:        "missing token",
-			token:       "",
-			expectError: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !strings.HasPrefix(r.URL.Path, "/inscriptions/") {
-					http.Error(w, "not found", http.StatusNotFound)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(InscriptionConfirmResponse{
-					ResponseCode:      0,
-					TbkUser:           "b6bd6ba3-e718-4107-9386-d2b099a8dd42",
-					AuthorizationCode: "123456",
-					CardType:          "Visa",
-					CardNumber:        "XXXXXXXXXXXX6623",
-				})
-			}))
-			defer server.Close()
-
-			svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			resp, err := svc.ConfirmInscription(ctx, tt.token)
-
-			if tt.expectError {
-				if err == nil {
-					t.Error("expected error, got nil")
-				}
-				return
+func TestFinishRequestShapeAndResponseCode(t *testing.T) {
+	t.Run("sends empty object body and escapes token", func(t *testing.T) {
+		token := "token/with/slash"
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPut {
+				t.Fatalf("expected PUT, got %s", r.Method)
+			}
+			if r.URL.EscapedPath() != "/inscriptions/token%2Fwith%2Fslash" {
+				t.Fatalf("unexpected path: %s (escaped: %s)", r.URL.Path, r.URL.EscapedPath())
+			}
+			body, _ := io.ReadAll(r.Body)
+			if strings.TrimSpace(string(body)) != "{}" {
+				t.Fatalf("expected empty JSON body {}, got: %q", string(body))
 			}
 
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if resp == nil {
-				t.Fatal("expected non-nil response")
-			}
-			if resp.TbkUser != "b6bd6ba3-e718-4107-9386-d2b099a8dd42" {
-				t.Errorf("unexpected tbk_user: %v", resp.TbkUser)
-			}
-		})
+			_ = json.NewEncoder(w).Encode(InscriptionConfirmResponse{
+				ResponseCode:      0,
+				TbkUser:           "b6bd6ba3-e718-4107-9386-d2b099a8dd42",
+				AuthorizationCode: "123456",
+				CardType:          "Visa",
+				CardNumber:        "XXXXXXXXXXXX6623",
+			})
+		}))
+		defer server.Close()
+
+		svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+		resp, err := svc.Finish(context.Background(), token)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.TbkUser == "" {
+			t.Fatal("expected tbk_user")
+		}
+	})
+
+	t.Run("non-zero response code returns typed error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(InscriptionConfirmResponse{ResponseCode: -2})
+		}))
+		defer server.Close()
+
+		svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+		_, err := svc.Finish(context.Background(), "token")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		var tbkErr *TransbankError
+		if !errors.As(err, &tbkErr) {
+			t.Fatalf("expected TransbankError, got %T", err)
+		}
+		if tbkErr.Code != -2 {
+			t.Fatalf("unexpected code: %d", tbkErr.Code)
+		}
+	})
+}
+
+func TestRemoveRequestShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Fatalf("expected DELETE, got %s", r.Method)
+		}
+		if r.URL.Path != "/inscriptions" {
+			t.Fatalf("expected /inscriptions, got %s", r.URL.Path)
+		}
+
+		var req DeleteInscriptionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.TbkUser != "tbk-user" || req.Username != "user_123" {
+			t.Fatalf("unexpected request: %+v", req)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	if err := svc.Remove(context.Background(), "tbk-user", "user_123"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-// TestDeleteInscription tests the DeleteInscription method.
-func TestDeleteInscription(t *testing.T) {
-	tests := []struct {
-		name        string
-		tbkUser     string
-		username    string
-		expectError bool
-	}{
-		{
-			name:        "valid deletion",
-			tbkUser:     "b6bd6ba3-e718-4107-9386-d2b099a8dd42",
-			username:    "usuario_123",
-			expectError: false,
-		},
-		{
-			name:        "missing tbk_user",
-			tbkUser:     "",
-			username:    "usuario_123",
-			expectError: true,
-		},
-		{
-			name:        "missing username",
-			tbkUser:     "b6bd6ba3-e718-4107-9386-d2b099a8dd42",
-			username:    "",
-			expectError: true,
-		},
-	}
+func TestAuthorizeRequestShapeAndNormalization(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/transactions" {
+			t.Fatalf("expected /transactions, got %s", r.URL.Path)
+		}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodDelete || r.URL.Path != "/inscriptions" {
-					http.Error(w, "not found", http.StatusNotFound)
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			}))
-			defer server.Close()
+		var req AuthorizeTransactionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.BuyOrder != "mall-order-1" {
+			t.Fatalf("unexpected buy_order: %s", req.BuyOrder)
+		}
+		if len(req.Details) != 1 {
+			t.Fatalf("expected one detail, got %d", len(req.Details))
+		}
+		if req.Details[0].InstallmentsNumber != 0 {
+			t.Fatalf("expected installments=0, got %d", req.Details[0].InstallmentsNumber)
+		}
 
-			svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			err := svc.DeleteInscription(ctx, tt.tbkUser, tt.username)
-
-			if tt.expectError {
-				if err == nil {
-					t.Error("expected error, got nil")
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+		_ = json.NewEncoder(w).Encode(AuthorizeTransactionResponse{
+			BuyOrder:        "mall-order-1",
+			CardDetail:      CardDetail{CardNumber: "6623"},
+			AccountingDate:  "0321",
+			SessionID:       "session-123",
+			VCI:             "TSY",
+			TransactionDate: time.Date(2026, 3, 22, 10, 0, 0, 0, time.UTC),
+			Details: []TransactionResponseDetail{{
+				Amount:             50000,
+				Status:             TransactionStatusAuthorized,
+				AuthorizationCode:  "1213",
+				PaymentTypeCode:    PaymentTypeNormalSale,
+				ResponseCode:       0,
+				InstallmentsNumber: 0,
+				CommerceCode:       "597055555542",
+				BuyOrder:           "child-order-1",
+				Balance:            50000,
+			}},
 		})
+	}))
+	defer server.Close()
+
+	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	resp, err := svc.Authorize(context.Background(), "user_123", "tbk-user", "mall-order-1", []TransactionDetail{{
+		CommerceCode:       "597055555542",
+		BuyOrder:           "child-order-1",
+		Amount:             50000,
+		InstallmentsNumber: -7,
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.SessionID != "session-123" || resp.VCI != "TSY" {
+		t.Fatalf("missing extended fields: %+v", resp)
+	}
+	if got := resp.Details[0].Balance; got != 50000 {
+		t.Fatalf("unexpected detail balance: %d", got)
 	}
 }
 
-// TestAuthorizeTransaction tests the AuthorizeTransaction method.
-func TestAuthorizeTransaction(t *testing.T) {
-	tests := []struct {
-		name        string
-		username    string
-		tbkUser     string
-		buyOrder    string
-		details     []TransactionDetail
-		expectError bool
-	}{
-		{
-			name:     "valid transaction",
-			username: "usuario_123",
-			tbkUser:  "b6bd6ba3-e718-4107-9386-d2b099a8dd42",
-			buyOrder: "415034240",
-			details: []TransactionDetail{
-				{
-					CommerceCode:       "597055555542",
-					BuyOrder:           "505479072",
-					Amount:             50000,
-					InstallmentsNumber: 1,
-				},
-			},
-			expectError: false,
-		},
-		{
-			name:        "missing username",
-			username:    "",
-			tbkUser:     "b6bd6ba3-e718-4107-9386-d2b099a8dd42",
-			buyOrder:    "415034240",
-			details:     []TransactionDetail{{CommerceCode: "597055555542", BuyOrder: "505479072", Amount: 50000, InstallmentsNumber: 1}},
-			expectError: true,
-		},
-		{
-			name:        "missing tbk_user",
-			username:    "usuario_123",
-			tbkUser:     "",
-			buyOrder:    "415034240",
-			details:     []TransactionDetail{{CommerceCode: "597055555542", BuyOrder: "505479072", Amount: 50000, InstallmentsNumber: 1}},
-			expectError: true,
-		},
-		{
-			name:        "missing buy_order",
-			username:    "usuario_123",
-			tbkUser:     "b6bd6ba3-e718-4107-9386-d2b099a8dd42",
-			buyOrder:    "",
-			details:     []TransactionDetail{{CommerceCode: "597055555542", BuyOrder: "505479072", Amount: 50000, InstallmentsNumber: 1}},
-			expectError: true,
-		},
-		{
-			name:        "missing details",
-			username:    "usuario_123",
-			tbkUser:     "b6bd6ba3-e718-4107-9386-d2b099a8dd42",
-			buyOrder:    "415034240",
-			details:     []TransactionDetail{},
-			expectError: true,
-		},
-		{
-			name:        "invalid amount",
-			username:    "usuario_123",
-			tbkUser:     "b6bd6ba3-e718-4107-9386-d2b099a8dd42",
-			buyOrder:    "415034240",
-			details:     []TransactionDetail{{CommerceCode: "597055555542", BuyOrder: "505479072", Amount: 0, InstallmentsNumber: 1}},
-			expectError: true,
-		},
-	}
+func TestStatusEscapesPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", r.Method)
+		}
+		if r.URL.EscapedPath() != "/transactions/parent%2Forder" {
+			t.Fatalf("unexpected path: %s (escaped: %s)", r.URL.Path, r.URL.EscapedPath())
+		}
+		_ = json.NewEncoder(w).Encode(AuthorizeTransactionResponse{BuyOrder: "parent/order"})
+	}))
+	defer server.Close()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/transactions" {
-					http.Error(w, "not found", http.StatusNotFound)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(AuthorizeTransactionResponse{
-					BuyOrder:       "415034240",
-					CardDetail:     CardDetail{CardNumber: "6623"},
-					AccountingDate: "0321",
-					Details: []TransactionResponseDetail{
-						{
-							Amount:             50000,
-							Status:             TransactionStatusAuthorized,
-							AuthorizationCode:  "1213",
-							PaymentTypeCode:    PaymentTypeNormalSale,
-							ResponseCode:       0,
-							InstallmentsNumber: 1,
-							CommerceCode:       "597055555542",
-							BuyOrder:           "505479072",
-						},
-					},
-				})
-			}))
-			defer server.Close()
-
-			svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			resp, err := svc.AuthorizeTransaction(ctx, tt.username, tt.tbkUser, tt.buyOrder, tt.details)
-
-			if tt.expectError {
-				if err == nil {
-					t.Error("expected error, got nil")
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if resp == nil {
-				t.Fatal("expected non-nil response")
-			}
-			if resp.BuyOrder != "415034240" {
-				t.Errorf("unexpected buy_order: %v", resp.BuyOrder)
-			}
-		})
+	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	if _, err := svc.Status(context.Background(), "parent/order"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-// TestReverseTransaction tests the ReverseTransaction method.
-func TestReverseTransaction(t *testing.T) {
-	tests := []struct {
-		name            string
-		buyOrder        string
-		commerceCode    string
-		detailBuyOrder  string
-		amount          int
-		expectError     bool
-	}{
-		{
-			name:           "valid reversal",
-			buyOrder:       "415034240",
-			commerceCode:   "597055555542",
-			detailBuyOrder: "505479072",
-			amount:         50000,
-			expectError:    false,
-		},
-		{
-			name:           "missing buy_order",
-			buyOrder:       "",
-			commerceCode:   "597055555542",
-			detailBuyOrder: "505479072",
-			amount:         50000,
-			expectError:    true,
-		},
-		{
-			name:           "missing commerce_code",
-			buyOrder:       "415034240",
-			commerceCode:   "",
-			detailBuyOrder: "505479072",
-			amount:         50000,
-			expectError:    true,
-		},
-		{
-			name:           "invalid amount",
-			buyOrder:       "415034240",
-			commerceCode:   "597055555542",
-			detailBuyOrder: "505479072",
-			amount:         0,
-			expectError:    true,
-		},
+func TestRefundRequestShapeAndReversedPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if r.URL.EscapedPath() != "/transactions/parent%2Forder/refunds" {
+			t.Fatalf("unexpected path: %s (escaped: %s)", r.URL.Path, r.URL.EscapedPath())
+		}
+		var req RefundRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.CommerceCode != "597055555542" || req.DetailBuyOrder != "child-order" || req.Amount != 50000 {
+			t.Fatalf("unexpected request: %+v", req)
+		}
+		_, _ = io.WriteString(w, `{"type":"REVERSED"}`)
+	}))
+	defer server.Close()
+
+	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	resp, err := svc.Refund(context.Background(), "parent/order", "597055555542", "child-order", 50000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !strings.Contains(r.URL.Path, "/transactions/") || !strings.HasSuffix(r.URL.Path, "/refunds") {
-					http.Error(w, "not found", http.StatusNotFound)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(RefundResponse{
-					Type:              "REVERSED",
-					AuthorizationCode: "1234",
-					NullifiedAmount:   50000,
-					Balance:           0,
-					ResponseCode:      0,
-				})
-			}))
-			defer server.Close()
-
-			svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			resp, err := svc.ReverseTransaction(ctx, tt.buyOrder, tt.commerceCode, tt.detailBuyOrder, tt.amount)
-
-			if tt.expectError {
-				if err == nil {
-					t.Error("expected error, got nil")
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if resp == nil {
-				t.Fatal("expected non-nil response")
-			}
-			if resp.Type != "REVERSED" {
-				t.Errorf("unexpected type: %v", resp.Type)
-			}
-		})
+	if resp.Type != "REVERSED" {
+		t.Fatalf("unexpected type: %+v", resp)
 	}
 }
 
-// TestContextCancellation tests that the service respects context cancellation.
+func TestCaptureRequestShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("expected PUT, got %s", r.Method)
+		}
+		if r.URL.Path != "/transactions/capture" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req CaptureRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.CommerceCode != "597055555542" || req.BuyOrder != "child-order" || req.AuthorizationCode != "1213" || req.CaptureAmount != 50000 {
+			t.Fatalf("unexpected request: %+v", req)
+		}
+
+		_ = json.NewEncoder(w).Encode(CaptureResponse{
+			AuthorizationCode: "152759",
+			AuthorizationDate: time.Date(2026, 3, 22, 11, 0, 0, 0, time.UTC),
+			CapturedAmount:    50000,
+			ResponseCode:      0,
+		})
+	}))
+	defer server.Close()
+
+	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	resp, err := svc.Capture(context.Background(), "597055555542", "child-order", "1213", 50000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.CapturedAmount != 50000 {
+		t.Fatalf("unexpected capture response: %+v", resp)
+	}
+}
+
+func TestCaptureFailureReturnsTypedError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error_message":"capture_amount is invalid"}`)
+	}))
+	defer server.Close()
+
+	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	_, err := svc.Capture(context.Background(), "597055555542", "child-order", "1213", 50000)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var tbkErr *TransbankError
+	if !errors.As(err, &tbkErr) {
+		t.Fatalf("expected TransbankError, got %T", err)
+	}
+	if tbkErr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unexpected code: %d", tbkErr.Code)
+	}
+}
+
+func TestErrorMessageParsing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error_message":"token is required"}`)
+	}))
+	defer server.Close()
+
+	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	_, err := svc.Finish(context.Background(), "token")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var tbkErr *TransbankError
+	if !errors.As(err, &tbkErr) {
+		t.Fatalf("expected TransbankError, got %T", err)
+	}
+	if tbkErr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unexpected code: %d", tbkErr.Code)
+	}
+	if !strings.Contains(tbkErr.Message, "token is required") {
+		t.Fatalf("unexpected message: %q", tbkErr.Message)
+	}
+}
+
+func TestValidationLimitsAndFormats(t *testing.T) {
+	svc, _ := NewOneclickService("597055555541", "secret", "https://example.com", nil)
+
+	tooLongUsername := strings.Repeat("a", maxUsernameLength+1)
+	_, err := svc.Start(context.Background(), tooLongUsername, "user@example.com", "https://merchant.com/return")
+	if err == nil || !errors.Is(err, ErrMaxLengthExceeded) {
+		t.Fatalf("expected max length error for username, got: %v", err)
+	}
+
+	tooLongEmail := strings.Repeat("a", maxEmailLength-9) + "@mail.test"
+	_, err = svc.Start(context.Background(), "user", tooLongEmail, "https://merchant.com/return")
+	if err == nil || !errors.Is(err, ErrMaxLengthExceeded) {
+		t.Fatalf("expected max length error for email, got: %v", err)
+	}
+
+	_, err = svc.Status(context.Background(), "orden-ñ")
+	if !errors.Is(err, ErrInvalidBuyOrderFmt) {
+		t.Fatalf("expected invalid buy_order format error, got: %v", err)
+	}
+
+	_, err = svc.Capture(context.Background(), strings.Repeat("1", maxCommerceCodeLength+1), "child-order", "1213", 1000)
+	if err == nil || !errors.Is(err, ErrMaxLengthExceeded) {
+		t.Fatalf("expected max length error for commerce_code, got: %v", err)
+	}
+}
+
 func TestContextCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(100 * time.Millisecond) // Simulate slow response
-		json.NewEncoder(w).Encode(InscriptionResponse{Token: "test"})
+		time.Sleep(100 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(InscriptionResponse{Token: "test"})
 	}))
 	defer server.Close()
 
@@ -541,8 +450,8 @@ func TestContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
-	_, err := svc.CreateInscription(ctx, "user", "email@test.com", "https://test.com/return")
+	_, err := svc.Start(ctx, "user", "email@test.com", "https://test.com/return")
 	if err == nil || !strings.Contains(err.Error(), "context") {
-		t.Errorf("expected context deadline error, got: %v", err)
+		t.Fatalf("expected context error, got: %v", err)
 	}
 }

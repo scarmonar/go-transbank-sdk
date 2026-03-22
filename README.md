@@ -1,113 +1,103 @@
 # go-transbank-sdk
 
-A pure Go SDK for Transbank Oneclick (non-mall) API integration. Provides simple, idiomatic Go methods for card inscription, authorization, and refunds.
+SDK en Go para **Transbank Oneclick Mall v1.2**.
 
-**Status**: Early version (v0.1.0) — Production-ready for Oneclick Non-Mall API v1.2.
+Fuente oficial única de contrato API:
+- https://www.transbankdevelopers.cl/referencia/oneclick
 
-## Features
+## Estado del proyecto
 
-- ✅ Card inscription with automated redirect flow
-- ✅ Transaction authorization on registered cards
-- ✅ Transaction status queries
-- ✅ Reversals/refunds
-- ✅ Card deletion/cancellation
-- ✅ Proper error handling with typed errors
-- ✅ Context cancellation support
-- ✅ Support for both integration and production environments
-- ✅ Zero external dependencies (stdlib only)
+Este SDK está orientado a paridad con el contrato REST oficial de Oneclick Mall.
 
-## Installation
+Operaciones soportadas:
+
+- `POST /inscriptions` (iniciar inscripción)
+- `PUT /inscriptions/{token}` (finalizar inscripción)
+- `DELETE /inscriptions` (eliminar inscripción)
+- `POST /transactions` (autorizar transacción)
+- `GET /transactions/{buyOrder}` (consultar estado)
+- `POST /transactions/{buyOrder}/refunds` (reversar/anular)
+- `PUT /transactions/capture` (captura diferida)
+
+## Requisitos
+
+- Go `1.26.1` (según `go.mod`)
+- Código de comercio y API Key Secret de Transbank
+
+## Instalación
 
 ```bash
 go get github.com/scarmonar/go-transbank-sdk
 ```
 
-Add to your `go.mod`:
+## Inicialización del servicio
 
 ```go
-require github.com/scarmonar/go-transbank-sdk v0.1.0
-```
-
-## Quick Start
-
-### 1. Create a Service Instance
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"github.com/scarmonar/go-transbank-sdk/oneclick"
+svc, err := oneclick.NewOneclickService(
+	"597055555541", // Código comercio mall (padre)
+	"TU_API_KEY_SECRET",
+	"https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2", // Integración
+	nil, // http.Client opcional
 )
-
-func main() {
-	// Integration environment (testing)
-	svc, err := oneclick.NewOneclickService(
-		"597055555541", // Parent commerce code
-		"579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C", // API secret
-		"https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
-		nil, // Use default HTTP client
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("Service created. Is Integration: %v\n", svc.IsIntegrationEnvironment())
+if err != nil {
+	panic(err)
 }
 ```
 
-### 2. Inscribe a Card
+## API pública
+
+Métodos disponibles en `oneclick.OneclickService`:
+
+- `Start(ctx, username, email, responseURL)`
+- `Finish(ctx, token)`
+- `Remove(ctx, tbkUser, username)`
+- `Authorize(ctx, username, tbkUser, buyOrder, details)`
+- `Status(ctx, buyOrder)`
+- `Refund(ctx, buyOrder, commerceCode, detailBuyOrder, amount)`
+- `Capture(ctx, commerceCode, buyOrder, authorizationCode, captureAmount)`
+
+## Flujo recomendado
+
+### 1) Iniciar inscripción
 
 ```go
-ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-defer cancel()
-
-resp, err := svc.CreateInscription(ctx,
-	"usuario_123",           // Username
-	"user@example.com",      // Email
-	"https://myapp.com/return-inscription", // Callback URL after user authorizes
+resp, err := svc.Start(ctx,
+	"usuario_123",
+	"user@example.com",
+	"https://mi-comercio.cl/oneclick/retorno",
 )
 if err != nil {
 	panic(err)
 }
 
-// Redirect user to resp.URLWebpay to authorize card (~$50 CLP test charge)
-fmt.Printf("Redirect user to: %s\nToken: %s\n", resp.URLWebpay, resp.Token)
+// Redireccionar navegador del usuario a resp.URLWebpay
+// enviando TBK_TOKEN=resp.Token
 ```
 
-### 3. Confirm Inscription (After User Returns)
+### 2) Finalizar inscripción
 
 ```go
-// Extract TBK_TOKEN from redirect URL parameter
-token := r.URL.Query().Get("TBK_TOKEN")
-
-confirmResp, err := svc.ConfirmInscription(ctx, token)
+finishResp, err := svc.Finish(ctx, tbkToken)
 if err != nil {
 	panic(err)
 }
 
-// $50 CLP test charge is automatically reversed by Transbank
-fmt.Printf("Card registered. Tbk User: %s\nCard: %s %s\n",
-	confirmResp.TbkUser,
-	confirmResp.CardType,
-	confirmResp.CardNumber,
-)
+fmt.Println("tbk_user:", finishResp.TbkUser)
 ```
 
-### 4. Make a Charge
+### 3) Autorizar cobro
 
 ```go
-resp, err := svc.AuthorizeTransaction(ctx,
-	"usuario_123",  // Username (must match inscription)
-	"b6bd6ba3-e718-4107-9386-d2b099a8dd42", // tbk_user from confirmation
-	"order_592301",  // Unique order ID (for idempotency)
+authResp, err := svc.Authorize(ctx,
+	"usuario_123",
+	finishResp.TbkUser,
+	"parent-order-1",
 	[]oneclick.TransactionDetail{
 		{
-			CommerceCode:       "597055555542", // Child commerce code
-			BuyOrder:           "order_592301", // Must be unique
-			Amount:             50000,          // CLP (no decimals): 50000 = $50k CLP
-			InstallmentsNumber: 1,              // No installments: 1
+			CommerceCode:       "597055555542", // comercio hijo
+			BuyOrder:           "child-order-1",
+			Amount:             50000,
+			InstallmentsNumber: 0,
 		},
 	},
 )
@@ -115,260 +105,150 @@ if err != nil {
 	panic(err)
 }
 
-// Check if all details were authorized
-for _, detail := range resp.Details {
-	if detail.Status == oneclick.TransactionStatusAuthorized {
-		fmt.Printf("Authorized: %s\n", detail.AuthorizationCode)
-	}
+for _, d := range authResp.Details {
+	fmt.Println(d.Status, d.ResponseCode, d.AuthorizationCode)
 }
 ```
 
-### 5. Reverse a Charge
+### 4) Consultar estado
 
 ```go
-refundResp, err := svc.ReverseTransaction(ctx,
-	"order_592301",         // Buy order from authorization
-	"597055555542",         // Commerce code
-	"order_592301",         // Detail buy order
-	50000,                  // Amount to refund (CLP)
+statusResp, err := svc.Status(ctx, "parent-order-1")
+if err != nil {
+	panic(err)
+}
+
+fmt.Println("detalle(s):", len(statusResp.Details))
+```
+
+### 5) Reversar o anular
+
+```go
+refundResp, err := svc.Refund(ctx,
+	"parent-order-1",
+	"597055555542",
+	"child-order-1",
+	50000,
 )
 if err != nil {
 	panic(err)
 }
 
-fmt.Printf("Reversed. Type: %s, Nullified: %d\n", refundResp.Type, refundResp.NullifiedAmount)
+fmt.Println("tipo:", refundResp.Type) // REVERSED o NULLIFIED
 ```
 
-### 6. Delete a Registered Card
+### 6) Captura diferida
 
 ```go
-err := svc.DeleteInscription(ctx,
-	"b6bd6ba3-e718-4107-9386-d2b099a8dd42", // tbk_user
-	"usuario_123", // username
+captureResp, err := svc.Capture(ctx,
+	"597055555542", // comercio hijo
+	"child-order-1",
+	"1213",         // authorization_code
+	50000,
 )
 if err != nil {
 	panic(err)
 }
 
-fmt.Println("Card unregistered")
+fmt.Println("captured_amount:", captureResp.CapturedAmount)
 ```
 
-## Error Handling
+## Estructuras principales
 
-The SDK uses typed errors for better control:
+- `InscriptionRequest` / `InscriptionResponse`
+- `InscriptionConfirmResponse`
+- `TransactionDetail`
+- `AuthorizeTransactionRequest` / `AuthorizeTransactionResponse`
+- `TransactionResponseDetail`
+- `RefundRequest` / `RefundResponse`
+- `CaptureRequest` / `CaptureResponse`
+
+Tipos de pago (`payment_type_code`) disponibles como constantes:
+
+- `PaymentTypeDebit` (`VD`)
+- `PaymentTypePrepaid` (`VP`)
+- `PaymentTypeNormalSale` (`VN`)
+- `PaymentTypeInstallments` (`VC`)
+- `PaymentType3InstallmentsNoInt` (`SI`)
+- `PaymentType2InstallmentsNoInt` (`S2`)
+- `PaymentTypeNInstallmentsNoInt` (`NC`)
+
+Estados de transacción disponibles como constantes:
+
+- `INITIALIZED`, `AUTHORIZED`, `REVERSED`, `FAILED`, `NULLIFIED`, `PARTIALLY_NULLIFIED`, `CAPTURED`
+
+## Reglas de validación
+
+Validaciones implementadas en el SDK (alineadas al contrato oficial):
+
+- `username`: obligatorio, máximo 40 caracteres
+- `email`: obligatorio, formato básico con `@`, máximo 100 caracteres
+- `response_url`: obligatoria, URL absoluta, máximo 255 caracteres
+- `tbk_user`: obligatorio, máximo 40 caracteres
+- `buy_order`: obligatorio, máximo 26 caracteres, con caracteres permitidos por Transbank
+- `commerce_code`: obligatorio, máximo 12 caracteres
+- `authorization_code`: obligatorio, máximo 6 caracteres
+- `amount` y `capture_amount`: deben ser `> 0`
+- `installments_number`:
+  - si es negativo, se normaliza a `0`
+  - si es mayor a `99`, retorna error
+
+## Manejo de errores
+
+Errores de API se exponen como `*oneclick.TransbankError`.
 
 ```go
-import (
-	"github.com/scarmonar/go-transbank-sdk/oneclick"
-)
-
-resp, err := svc.ConfirmInscription(ctx, token)
-
+resp, err := svc.Finish(ctx, token)
 if err != nil {
-	// Check for specific errors
-	if errors.Is(err, oneclick.ErrInvalidToken) {
-		// Handle missing token
-	}
-
-	// Check for Transbank API errors
 	var tbkErr *oneclick.TransbankError
 	if errors.As(err, &tbkErr) {
-		if tbkErr.IsUserCancelled() {
-			// User clicked cancel on Transbank form (code -2)
-		} else if tbkErr.IsGenericError() {
-			// Generic Transbank error (code -1)
-		} else {
-			// Handle response_code (numerical error)
-			fmt.Printf("Error code: %d, Message: %s\n", tbkErr.Code, tbkErr.Message)
-		}
+		fmt.Println("codigo:", tbkErr.Code)
+		fmt.Println("mensaje:", tbkErr.Message)
+		fmt.Println("detalle:", tbkErr.Details)
 	}
 }
 ```
 
-## Request/Response Structs
+El parser considera, entre otros, payloads como:
 
-### Inscription
-
-**Request**: `InscriptionRequest`
-```go
-type InscriptionRequest struct {
-	Username    string // User identifier
-	Email       string // User email for notifications
-	ResponseURL string // URL to redirect after authorization
-}
+```json
+{"error_message":"token is required"}
 ```
 
-**Response**: `InscriptionResponse`
-```go
-type InscriptionResponse struct {
-	Token     string // Token for confirmation step
-	URLWebpay string // Redirect URL for user authorization
-}
-```
+## Ambientes
 
-### Confirmation
+Integración:
 
-**Response**: `InscriptionConfirmResponse`
-```go
-type InscriptionConfirmResponse struct {
-	ResponseCode      int    // 0 = success
-	TbkUser           string // Unique identifier for registered card
-	AuthorizationCode string // Authorization code for this request
-	CardType          string // "Visa", "Mastercard", etc.
-	CardNumber        string // Masked: "XXXXXXXXXXXX6623"
-}
-```
+- `https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2`
 
-### Authorization
+Producción:
 
-**Request**: `AuthorizeTransactionRequest`
-```go
-type AuthorizeTransactionRequest struct {
-	Username string               // Username from inscription
-	TbkUser  string               // tbk_user from confirmation
-	BuyOrder string               // Unique order ID
-	Details  []TransactionDetail  // One or more transactions
-}
+- `https://webpay3g.transbank.cl/rswebpaytransaction/api/oneclick/v1.2`
 
-type TransactionDetail struct {
-	CommerceCode       string // Child commerce code
-	BuyOrder           string // Must be unique
-	Amount             int    // CLP without decimals
-	InstallmentsNumber int    // 1 for no installments
-}
-```
+## Credenciales de integración (documentación Transbank)
 
-**Response**: `AuthorizeTransactionResponse`
-```go
-type AuthorizeTransactionResponse struct {
-	BuyOrder        string                      // Your order ID
-	CardDetail      CardDetail                  // {CardNumber: "...6623"}
-	AccountingDate  string                      // "0321" = March 21
-	TransactionDate time.Time                   // Response timestamp
-	Details         []TransactionResponseDetail // Mirrors details sent
-}
+- Comercio mall (padre): `597055555541`
+- Comercios hijo: `597055555542`, `597055555543`
+- API Key Secret: `579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C`
 
-type TransactionResponseDetail struct {
-	Amount             int    // Charged amount (CLP)
-	Status             string // TransactionStatusAuthorized, TransactionStatusFailed, etc.
-	AuthorizationCode  string // Code if authorized
-	PaymentTypeCode    string // "VN" (normal), "VC" (installments), etc.
-	ResponseCode       int    // 0 = success
-	InstallmentsNumber int
-	CommerceCode       string
-	BuyOrder           string
-}
-```
+## Ejemplos incluidos
 
-### Transaction Status
+- `examples/simple_inscription/main.go`
+- `examples/simple_charge/main.go`
 
-Query transaction status by order ID:
-
-```go
-resp, err := svc.GetTransactionStatus(ctx, "order_592301")
-// Returns AuthorizeTransactionResponse
-```
-
-## Amount Handling (CLP)
-
-Chilean Peso amounts are sent as **integers without decimals**:
-
-| Amount | CLP Value | Code |
-|--------|-----------|------|
-| `50` | $50 CLP | `50` |
-| `50000` | $50.000 CLP | `50000` |
-| `100000` | $100.000 CLP | `100000` |
-
-**No decimal point** in the `amount` field.
-
-Conversion example:
-```go
-amountCLP := float64(5000) // $5k CLP
-amountInt := int(amountCLP) // → 5000
-```
-
-## Status/Response Codes
-
-### Authorization Status Values
-
-```go
-const (
-	TransactionStatusInitialized        = "INITIALIZED"
-	TransactionStatusAuthorized         = "AUTHORIZED"
-	TransactionStatusReversed           = "REVERSED"
-	TransactionStatusFailed             = "FAILED"
-	TransactionStatusNullified          = "NULLIFIED"
-	TransactionStatusPartiallyNullified = "PARTIALLY_NULLIFIED"
-	TransactionStatusCaptured           = "CAPTURED"
-)
-```
-
-### Response Codes
-
-```go
-const (
-	ResponseCodeSuccess        = 0    // Approved
-	ResponseCodeGenericError   = -1   // General failure
-	ResponseCodeUserCancelled  = -2   // User clicked cancel
-)
-```
-
-## Environment Detection
-
-```go
-if svc.IsIntegrationEnvironment() {
-	fmt.Println("Using sandbox environment")
-}
-
-if svc.IsProduction() {
-	fmt.Println("Using production environment")
-}
-```
-
-## Test Credentials (Integration)
-
-```
-Parent Commerce Code: 597055555541
-Child Commerce Code 1: 597055555542
-Child Commerce Code 2: 597055555543
-API Secret: 579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C
-Base URL: https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2
-```
-
-## Production URLs
-
-Change the `baseURL` when deploying to production:
-
-```go
-svc, _ := oneclick.NewOneclickService(
-	commerceCode,
-	apiSecret,
-	"https://webpay3g.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
-	nil,
-)
-```
-
-## Testing
-
-Run the test suite:
+## Pruebas
 
 ```bash
-go test ./oneclick -v -race
+go test ./...
 ```
 
-## Architecture
+## Recomendaciones de seguridad
 
-- **Zero external dependencies**: Uses only stdlib (`net/http`, `encoding/json`, `context`, etc.)
-- **Proper context handling**: All blocking operations accept `context.Context`
-- **Idiomatic Go**: Follows Go conventions, uses interfaces where appropriate
-- **Error wrapping**: Errors use `%w` for proper `errors.Is()` and `errors.As()` support
-- **Table-driven tests**: Comprehensive test coverage with subtests
+- No hardcodear credenciales en código fuente.
+- Usar variables de entorno o un secret manager.
+- Rotar credenciales si se exponen accidentalmente.
 
-## License
+## Referencias
 
-MIT
-
-## References
-
-- [Transbank Developers - Oneclick Documentation](https://github.com/TransbankDevelopers/transbank-developers-docs/blob/master/documentacion/oneclick/README.md)
-- [Transbank Oneclick REST API v1.2](https://webpay3g.transbank.cl/webpayserver/oneclick.api.documentation.html)
+- Referencia API Oneclick: https://www.transbankdevelopers.cl/referencia/oneclick
+- Documentación funcional: https://transbankdevelopers.cl/documentacion/oneclick

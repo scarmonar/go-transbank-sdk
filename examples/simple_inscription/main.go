@@ -9,7 +9,7 @@ import (
 	"github.com/scarmonar/go-transbank-sdk/oneclick"
 )
 
-// Example: Simple inscription flow
+// Example: simple Oneclick Mall inscription flow.
 // This shows how to:
 // 1. Create an inscription
 // 2. Redirect user to Transbank
@@ -30,7 +30,7 @@ func main() {
 	defer cancel()
 
 	fmt.Println("=== Step 1: Create Inscription ===")
-	inscResp, err := svc.CreateInscription(
+	inscResp, err := svc.Start(
 		ctx,
 		"usuario_123",
 		"user@example.com",
@@ -50,7 +50,7 @@ func main() {
 	token := inscResp.Token
 
 	fmt.Println("\n=== Step 2: Confirm Inscription ===")
-	confirmResp, err := svc.ConfirmInscription(ctx, token)
+	confirmResp, err := svc.Finish(ctx, token)
 	if err != nil {
 		log.Fatalf("Failed to confirm inscription: %v", err)
 	}

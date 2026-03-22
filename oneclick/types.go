@@ -11,9 +11,8 @@ type InscriptionRequest struct {
 
 // InscriptionResponse represents the response from creating an inscription.
 type InscriptionResponse struct {
-	Token      string `json:"token"`
-	URLWebpay  string `json:"url_webpay"`
-	StatusCode int    `json:"status_code,omitempty"`
+	Token     string `json:"token"`
+	URLWebpay string `json:"url_webpay"`
 }
 
 // InscriptionConfirmRequest represents a request to confirm an inscription.
@@ -47,10 +46,10 @@ type TransactionDetail struct {
 
 // AuthorizeTransactionRequest represents a request to authorize a transaction.
 type AuthorizeTransactionRequest struct {
-	Username string               `json:"username"`
-	TbkUser  string               `json:"tbk_user"`
-	BuyOrder string               `json:"buy_order"`
-	Details  []TransactionDetail  `json:"details"`
+	Username string              `json:"username"`
+	TbkUser  string              `json:"tbk_user"`
+	BuyOrder string              `json:"buy_order"`
+	Details  []TransactionDetail `json:"details"`
 }
 
 // CardDetail represents card information in a transaction response.
@@ -60,22 +59,25 @@ type CardDetail struct {
 
 // TransactionResponseDetail represents a single detail in a transaction response.
 type TransactionResponseDetail struct {
-	Amount              int    `json:"amount"`
-	Status              string `json:"status"`
-	AuthorizationCode   string `json:"authorization_code"`
-	PaymentTypeCode     string `json:"payment_type_code"`
-	ResponseCode        int    `json:"response_code"`
-	InstallmentsNumber  int    `json:"installments_number"`
-	CommerceCode        string `json:"commerce_code"`
-	BuyOrder            string `json:"buy_order"`
+	Amount             int    `json:"amount"`
+	Status             string `json:"status"`
+	AuthorizationCode  string `json:"authorization_code"`
+	PaymentTypeCode    string `json:"payment_type_code"`
+	ResponseCode       int    `json:"response_code"`
+	InstallmentsNumber int    `json:"installments_number"`
+	CommerceCode       string `json:"commerce_code"`
+	BuyOrder           string `json:"buy_order"`
+	Balance            int    `json:"balance,omitempty"`
 }
 
 // AuthorizeTransactionResponse represents the response from authorizing a transaction.
 type AuthorizeTransactionResponse struct {
-	BuyOrder        string                     `json:"buy_order"`
-	CardDetail      CardDetail                 `json:"card_detail"`
-	AccountingDate  string                     `json:"accounting_date"`
-	TransactionDate time.Time                  `json:"transaction_date"`
+	BuyOrder        string                      `json:"buy_order"`
+	CardDetail      CardDetail                  `json:"card_detail"`
+	AccountingDate  string                      `json:"accounting_date"`
+	SessionID       string                      `json:"session_id,omitempty"`
+	VCI             string                      `json:"vci,omitempty"`
+	TransactionDate time.Time                   `json:"transaction_date"`
 	Details         []TransactionResponseDetail `json:"details"`
 }
 
@@ -86,27 +88,44 @@ type GetTransactionStatusRequest struct {
 
 // RefundRequest represents a request to refund/reverse a transaction.
 type RefundRequest struct {
-	CommerceCode    string `json:"commerce_code"`
-	DetailBuyOrder  string `json:"detail_buy_order"`
-	Amount          int    `json:"amount"`
+	CommerceCode   string `json:"commerce_code"`
+	DetailBuyOrder string `json:"detail_buy_order"`
+	Amount         int    `json:"amount"`
 }
 
 // RefundResponse represents the response from a refund/reverse operation.
 type RefundResponse struct {
-	Type               string `json:"type"`
-	AuthorizationCode  string `json:"authorization_code"`
-	AuthorizationDate  time.Time `json:"authorization_date"`
-	NullifiedAmount    int    `json:"nullified_amount"`
-	Balance            int    `json:"balance"`
-	ResponseCode       int    `json:"response_code"`
+	Type              string    `json:"type"`
+	AuthorizationCode string    `json:"authorization_code,omitempty"`
+	AuthorizationDate time.Time `json:"authorization_date,omitempty"`
+	NullifiedAmount   int       `json:"nullified_amount,omitempty"`
+	Balance           int       `json:"balance,omitempty"`
+	ResponseCode      int       `json:"response_code,omitempty"`
+	BuyOrder          string    `json:"buy_order,omitempty"`
+}
+
+// CaptureRequest represents a deferred capture request.
+type CaptureRequest struct {
+	CommerceCode      string `json:"commerce_code"`
+	BuyOrder          string `json:"buy_order"`
+	CaptureAmount     int    `json:"capture_amount"`
+	AuthorizationCode string `json:"authorization_code"`
+}
+
+// CaptureResponse represents a deferred capture response.
+type CaptureResponse struct {
+	AuthorizationCode string    `json:"authorization_code"`
+	AuthorizationDate time.Time `json:"authorization_date"`
+	CapturedAmount    int       `json:"captured_amount"`
+	ResponseCode      int       `json:"response_code"`
 }
 
 // PaymentTypeCode constants
 const (
-	PaymentTypeDebit             = "VD"
-	PaymentTypePrepaid           = "VP"
-	PaymentTypeNormalSale        = "VN"
-	PaymentTypeInstallments      = "VC"
+	PaymentTypeDebit              = "VD"
+	PaymentTypePrepaid            = "VP"
+	PaymentTypeNormalSale         = "VN"
+	PaymentTypeInstallments       = "VC"
 	PaymentType3InstallmentsNoInt = "SI"
 	PaymentType2InstallmentsNoInt = "S2"
 	PaymentTypeNInstallmentsNoInt = "NC"
@@ -125,7 +144,7 @@ const (
 
 // ResponseCode constants
 const (
-	ResponseCodeSuccess        = 0
-	ResponseCodeGenericError   = -1
-	ResponseCodeUserCancelled  = -2
+	ResponseCodeSuccess       = 0
+	ResponseCodeGenericError  = -1
+	ResponseCodeUserCancelled = -2
 )
