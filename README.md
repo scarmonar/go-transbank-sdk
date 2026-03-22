@@ -21,13 +21,19 @@ Operaciones soportadas:
 
 ## Requisitos
 
-- Go `1.26.1` (según `go.mod`)
+- Go `1.16+` (mínimo requerido por esta librería)
 - Código de comercio y API Key Secret de Transbank
 
 ## Instalación
 
 ```bash
 go get github.com/scarmonar/go-transbank-sdk
+```
+
+## Importación
+
+```go
+import "github.com/scarmonar/go-transbank-sdk/oneclick"
 ```
 
 ## Inicialización del servicio

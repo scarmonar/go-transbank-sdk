@@ -17,7 +17,7 @@ Cobertura actual:
 
 ## Requisitos
 
-- Go `1.26.1+`
+- Go `1.16+`
 - Conectividad a `webpay3gint.transbank.cl`
 - Variable `TRANSBANK_RUN_INTEGRATION_TESTS=1` para habilitar ejecución
 
