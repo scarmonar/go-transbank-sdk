@@ -1,375 +1,392 @@
-//go:build integration
-
 package oneclick
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
 
-// Integration tests for Transbank Oneclick API
-// These tests validate the SDK against the real Transbank integration environment
-// 
-// Website: https://www.transbankdevelopers.cl/documentacion/como_empezar#ambientes
-// API Reference: https://www.transbankdevelopers.cl/referencia/oneclick
-//
-// Run ALL tests:
-//   go test -tags=integration -v ./...
-//
-// Run specific test:
-//   go test -tags=integration -v -run TestIntegrationCredentialsValid ./oneclick
+const (
+	defaultIntegrationChildCode   = "597055555542"
+	defaultIntegrationResponseURL = "https://example.com/oneclick/return"
+)
 
-// TestIntegrationCredentialsValid validates that the SDK can be initialized with valid credentials
-func TestIntegrationCredentialsValid(t *testing.T) {
-	t.Log("Test: Initialize SDK with integration environment credentials")
-	
-	svc, err := getIntegrationService(t)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
-	}
+type integrationConfig struct {
+	BaseURL      string
+	CommerceCode string
+	APISecret    string
+	ResponseURL  string
+	EmailDomain  string
+	ChildCode    string
+	Amount       int
 
-	// Assertions
-	if svc.CommerceCode() != "597055555541" {
-		t.Fatalf("expected commerce code 597055555541, got %s", svc.CommerceCode())
-	}
+	RunMutating bool
 
-	if !svc.IsIntegrationEnvironment() {
-		t.Fatal("expected integration environment detected")
-	}
+	Username string
+	TbkUser  string
 
-	if svc.IsProduction() {
-		t.Fatal("should not be detected as production")
-	}
+	FinishToken string
 
-	t.Logf("✓ Commerce Code: %s", svc.CommerceCode())
-	t.Logf("✓ Environment: Integration (not production)")
+	RemoveUsername string
+	RemoveTbkUser  string
+
+	CaptureCode   string
+	CaptureOrder  string
+	CaptureAuth   string
+	CaptureAmount int
 }
 
-// TestIntegrationStartInscription tests creating a new inscription
-// This corresponds to POST /inscriptions endpoint
-func TestIntegrationStartInscription(t *testing.T) {
-	t.Log("Test: Create new inscription (POST /inscriptions)")
-	
-	svc, err := getIntegrationService(t)
-	if err != nil {
-		t.Fatalf("failed to get service: %v", err)
-	}
+func TestIntegrationOneclickStart(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	svc := newIntegrationService(t, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	username := fmt.Sprintf("test_user_%d", time.Now().Unix())
-	email := fmt.Sprintf("test_%d@example.com", time.Now().Unix())
+	username := randomUsername("it-start")
+	email := fmt.Sprintf("%s@%s", username, cfg.EmailDomain)
 
-	inscResp, err := svc.Start(ctx, username, email, "https://mysite.com/callback")
+	resp, err := svc.Start(ctx, username, email, cfg.ResponseURL)
 	if err != nil {
-		t.Fatalf("failed to start inscription: %v", err)
+		t.Fatalf("start failed: %v", err)
 	}
-
-	// Validate response structure
-	if inscResp.Token == "" {
-		t.Fatal("expected non-empty token")
+	if strings.TrimSpace(resp.Token) == "" {
+		t.Fatal("start returned empty token")
 	}
-	if inscResp.URLWebpay == "" {
-		t.Fatal("expected non-empty webpay URL")
+	if strings.TrimSpace(resp.URLWebpay) == "" {
+		t.Fatal("start returned empty url_webpay")
 	}
-
-	t.Logf("✓ Inscription created successfully")
-	t.Logf("  Token: %s", inscResp.Token)
-	t.Logf("  Webpay URL: %s", inscResp.URLWebpay)
-	t.Logf("  → User must visit this URL and authorize their card")
-	t.Logf("  → They will be redirected back with TBK_TOKEN=%s", inscResp.Token)
+	if !strings.Contains(strings.ToLower(resp.URLWebpay), "webpay") {
+		t.Fatalf("unexpected url_webpay: %s", resp.URLWebpay)
+	}
 }
 
-// TestIntegrationInscriptionFlow tests the complete inscription workflow
-// NOTE: This requires manual authorization at Transbank website
-// The test demonstrates the flow but may fail at confirmation step if token not manually authorized
-func TestIntegrationInscriptionFlow(t *testing.T) {
-	t.Log("Test: Complete inscription flow (requires manual authorization)")
-	
-	svc, err := getIntegrationService(t)
-	if err != nil {
-		t.Fatalf("failed to get service: %v", err)
-	}
+func TestIntegrationOneclickFinishWithoutCustomerInteraction(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	svc := newIntegrationService(t, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	// Step 1: Create inscription
-	t.Log("  Step 1: POST /inscriptions")
-	username := fmt.Sprintf("testuser_%d", time.Now().Unix())
-	email := fmt.Sprintf("user_%d@test.com", time.Now().Unix())
-
-	inscResp, err := svc.Start(ctx, username, email, "https://mysite.com/return")
+	username := randomUsername("it-finish")
+	email := fmt.Sprintf("%s@%s", username, cfg.EmailDomain)
+	startResp, err := svc.Start(ctx, username, email, cfg.ResponseURL)
 	if err != nil {
-		t.Fatalf("failed to start inscription: %v", err)
+		t.Fatalf("start precondition failed: %v", err)
 	}
 
-	if inscResp.Token == "" {
-		t.Fatal("expected non-empty token")
+	_, err = svc.Finish(ctx, startResp.Token)
+	if err == nil {
+		t.Fatal("expected finish error without customer completing webpay inscription")
 	}
-
-	t.Logf("  ✓ Inscription created")
-	t.Logf("    Token: %s", inscResp.Token)
-	t.Logf("    Webpay URL: %s (requires manual authorization)", inscResp.URLWebpay)
-
-	// Step 2: Attempt to confirm after manual authorization
-	// In real scenario: user goes to URLWebpay, authorizes card, gets redirected with TBK_TOKEN
-	t.Log("  Step 2: PUT /inscriptions/{token} (confirm)")
-	confirmResp, err := svc.Finish(ctx, inscResp.Token)
-	
-	// The token might not be authorized yet (manual browser step required)
-	// This is EXPECTED to fail unless the token was manually authorized
-	if err != nil {
-		t.Logf("  ⚠ Confirmation failed (expected without manual authorization)")
-		t.Logf("    → Error: %v", err)
-		t.Logf("    → To complete: User must manually authorize at Transbank")
-		return
-	}
-
-	// If we get here, token was authorized successfully
-	if confirmResp.ResponseCode != 0 && confirmResp.ResponseCode != 1 {
-		t.Fatalf("expected response code 0 or 1, got %d", confirmResp.ResponseCode)
-	}
-
-	t.Logf("  ✓ Inscription confirmed")
-	t.Logf("    Tbk User: %s", confirmResp.TbkUser)
-	t.Logf("    Auth Code: %s", confirmResp.AuthorizationCode)
-	t.Logf("    Card Type: %s", confirmResp.CardType)
-	t.Logf("    Card Number: %s", confirmResp.CardNumber)
+	t.Logf("finish without customer flow returned expected error: %v", err)
 }
 
-// TestIntegrationAuthorizeWithTestCard attempts to authorize using the documented test card
-// This shows the API structure but will fail because usernames must match registered pairs
-func TestIntegrationAuthorizeWithTestCard(t *testing.T) {
-	t.Log("Test: Authorize transaction with test card (documents API structure)")
-
-	svc, err := getIntegrationService(t)
-	if err != nil {
-		t.Fatalf("failed to get service: %v", err)
+func TestIntegrationOneclickFinishWithFixture(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	if cfg.FinishToken == "" {
+		t.Skip("set TRANSBANK_TEST_FINISH_TOKEN to run finish success test")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	svc := newIntegrationService(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	// These are the documented test values from Transbank
-	// In real usage, tbkUser comes from a completed inscription
-	testTbkUser := "b6bd6ba3-e718-4107-9386-d2b099a8dd42"
-	testUsername := "authenticated_user"
-	testBuyOrder := fmt.Sprintf("order_%d", time.Now().Unix())
+	resp, err := svc.Finish(ctx, cfg.FinishToken)
+	if err != nil {
+		t.Fatalf("finish with fixture token failed: %v", err)
+	}
+	if resp.ResponseCode != 0 {
+		t.Fatalf("unexpected response_code: %d", resp.ResponseCode)
+	}
+	if strings.TrimSpace(resp.TbkUser) == "" {
+		t.Fatal("finish returned empty tbk_user")
+	}
+}
 
-	t.Logf("Attempting authorization with:")
-	t.Logf("  Tbk User: %s", testTbkUser)
-	t.Logf("  Username: %s", testUsername)
-	t.Logf("  Buy Order: %s", testBuyOrder)
+func TestIntegrationOneclickRemoveUnknown(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	svc := newIntegrationService(t, cfg)
 
-	authResp, err := svc.Authorize(ctx,
-		testUsername,
-		testTbkUser,
-		testBuyOrder,
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	err := svc.Remove(ctx, randomTbkUser(), randomUsername("it-rm"))
+	if err == nil {
+		t.Fatal("expected remove error for unknown inscription")
+	}
+	t.Logf("remove unknown returned expected error: %v", err)
+}
+
+func TestIntegrationOneclickRemoveWithFixture(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	if !cfg.RunMutating {
+		t.Skip("set TRANSBANK_TEST_RUN_MUTATING=1 to run mutating integration tests")
+	}
+	if cfg.RemoveTbkUser == "" || cfg.RemoveUsername == "" {
+		t.Skip("set TRANSBANK_TEST_REMOVE_TBK_USER and TRANSBANK_TEST_REMOVE_USERNAME to run remove fixture test")
+	}
+
+	svc := newIntegrationService(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	err := svc.Remove(ctx, cfg.RemoveTbkUser, cfg.RemoveUsername)
+	if err != nil {
+		t.Fatalf("remove with fixture failed: %v", err)
+	}
+}
+
+func TestIntegrationOneclickAuthorizeUnknownUser(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	svc := newIntegrationService(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	resp, err := svc.Authorize(ctx,
+		randomUsername("it-auth"),
+		randomTbkUser(),
+		randomBuyOrder("parent"),
 		[]TransactionDetail{
 			{
-				CommerceCode:       "597055555542",
-				BuyOrder:           fmt.Sprintf("item_%d", time.Now().Unix()),
-				Amount:             50000,
+				CommerceCode:       cfg.ChildCode,
+				BuyOrder:           randomBuyOrder("child"),
+				Amount:             cfg.Amount,
 				InstallmentsNumber: 0,
 			},
 		},
 	)
-
 	if err != nil {
-		// This is expected to fail with the test values
-		// because the username/tbkUser pair is not actually registered
-		t.Logf("⚠ Authorization failed (expected with test values)")
-		t.Logf("  Error: %v", err)
-		t.Logf("  This demonstrates the API is responding correctly")
-		t.Logf("  To authenticate for real: complete an inscription first")
+		t.Logf("authorize unknown user returned expected HTTP/API error: %v", err)
 		return
 	}
+	if len(resp.Details) == 0 {
+		t.Fatal("authorize unknown user returned no details and no error")
+	}
 
-	// If request was successful, validate response structure
-	if authResp.BuyOrder == "" {
-		t.Fatal("expected buy order in response")
+	detail := resp.Details[0]
+	if detail.ResponseCode == 0 && detail.Status == TransactionStatusAuthorized {
+		t.Fatalf("expected authorization rejection for unknown user, got approved detail: %+v", detail)
+	}
+}
+
+func TestIntegrationOneclickStatusUnknownBuyOrder(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	svc := newIntegrationService(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	_, err := svc.Status(ctx, randomBuyOrder("unknown"))
+	if err == nil {
+		t.Fatal("expected error for unknown buy_order, got nil")
+	}
+	t.Logf("status for unknown buy_order returned expected error: %v", err)
+}
+
+func TestIntegrationOneclickRefundUnknownBuyOrder(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	svc := newIntegrationService(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	_, err := svc.Refund(ctx, randomBuyOrder("unknown"), cfg.ChildCode, randomBuyOrder("child"), cfg.Amount)
+	if err == nil {
+		t.Fatal("expected refund error for unknown buy_order")
+	}
+	t.Logf("refund unknown transaction returned expected error: %v", err)
+}
+
+func TestIntegrationOneclickCaptureUnknown(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	svc := newIntegrationService(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	_, err := svc.Capture(ctx, cfg.ChildCode, randomBuyOrder("capture"), "1213", cfg.Amount)
+	if err == nil {
+		t.Fatal("expected capture error for unknown transaction")
+	}
+	t.Logf("capture unknown transaction returned expected error: %v", err)
+}
+
+func TestIntegrationOneclickAuthorizeStatusRefundHappyPath(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	if !cfg.RunMutating {
+		t.Skip("set TRANSBANK_TEST_RUN_MUTATING=1 to run mutating integration tests")
+	}
+	if cfg.TbkUser == "" || cfg.Username == "" {
+		t.Skip("set TRANSBANK_TEST_TBK_USER and TRANSBANK_TEST_USERNAME to run authorize/status/refund happy path")
+	}
+
+	svc := newIntegrationService(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	parentBuyOrder := randomBuyOrder("parent")
+	childBuyOrder := randomBuyOrder("child")
+
+	authResp, err := svc.Authorize(ctx,
+		cfg.Username,
+		cfg.TbkUser,
+		parentBuyOrder,
+		[]TransactionDetail{
+			{
+				CommerceCode:       cfg.ChildCode,
+				BuyOrder:           childBuyOrder,
+				Amount:             cfg.Amount,
+				InstallmentsNumber: 0,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("authorize failed: %v", err)
 	}
 	if len(authResp.Details) == 0 {
-		t.Fatal("expected transaction details in response")
+		t.Fatal("authorize returned empty details")
 	}
 
-	t.Logf("✓ Authorization succeeded")
-	t.Logf("  Buy Order: %s", authResp.BuyOrder)
-	t.Logf("  Details: %d transaction(s)", len(authResp.Details))
-	for i, detail := range authResp.Details {
-		t.Logf("    Detail %d - Status: %s, Response Code: %d", 
-			i, detail.Status, detail.ResponseCode)
+	detail := authResp.Details[0]
+	if detail.ResponseCode != 0 || detail.Status != TransactionStatusAuthorized {
+		t.Fatalf("authorize detail not approved: status=%s response_code=%d", detail.Status, detail.ResponseCode)
+	}
+
+	statusResp, err := svc.Status(ctx, parentBuyOrder)
+	if err != nil {
+		t.Fatalf("status failed after authorize: %v", err)
+	}
+	if len(statusResp.Details) == 0 {
+		t.Fatal("status returned empty details")
+	}
+
+	refundResp, err := svc.Refund(ctx, parentBuyOrder, cfg.ChildCode, childBuyOrder, cfg.Amount)
+	if err != nil {
+		t.Fatalf("refund failed: %v", err)
+	}
+	if refundResp.Type != "REVERSED" && refundResp.Type != "NULLIFIED" {
+		t.Fatalf("unexpected refund type: %s", refundResp.Type)
 	}
 }
 
-// TestIntegrationTransactionStatus demonstrates the status query endpoint
-func TestIntegrationTransactionStatus(t *testing.T) {
-	t.Log("Test: Query transaction status (GET /transactions/{buyOrder})")
-
-	svc, err := getIntegrationService(t)
-	if err != nil {
-		t.Fatalf("failed to get service: %v", err)
+func TestIntegrationOneclickCaptureWithFixture(t *testing.T) {
+	cfg := loadIntegrationConfig(t)
+	if !cfg.RunMutating {
+		t.Skip("set TRANSBANK_TEST_RUN_MUTATING=1 to run mutating integration tests")
+	}
+	if cfg.CaptureCode == "" || cfg.CaptureOrder == "" || cfg.CaptureAuth == "" || cfg.CaptureAmount <= 0 {
+		t.Skip("set capture fixtures (TRANSBANK_TEST_CAPTURE_*) to run capture integration test")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	svc := newIntegrationService(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	// Query a non-existent order (expected behavior)
-	buyOrder := "nonexistent_order_12345"
-
-	t.Logf("Querying status for buy order: %s", buyOrder)
-	statusResp, err := svc.Status(ctx, buyOrder)
-
+	resp, err := svc.Capture(ctx, cfg.CaptureCode, cfg.CaptureOrder, cfg.CaptureAuth, cfg.CaptureAmount)
 	if err != nil {
-		// Expected for non-existent orders
-		t.Logf("✓ Status query responded with error (expected for non-existent order)")
-		t.Logf("  Error: %v", err)
-		return
+		t.Fatalf("capture failed: %v", err)
 	}
-
-	// If successful, validate structure
-	if statusResp == nil {
-		t.Fatal("expected status response")
+	if resp.ResponseCode != 0 {
+		t.Fatalf("capture rejected: response_code=%d", resp.ResponseCode)
 	}
-
-	t.Logf("✓ Status query succeeded")
-	t.Logf("  Details count: %d", len(statusResp.Details))
-	for i, detail := range statusResp.Details {
-		t.Logf("    Detail %d - Status: %s, Response Code: %d", 
-			i, detail.Status, detail.ResponseCode)
+	if resp.CapturedAmount <= 0 {
+		t.Fatalf("unexpected captured_amount: %d", resp.CapturedAmount)
 	}
 }
 
-// TestIntegrationErrorHandling validates error responses from Transbank
-func TestIntegrationErrorHandling(t *testing.T) {
-	t.Log("Test: Validate error handling with invalid inputs")
-
-	svc, err := getIntegrationService(t)
-	if err != nil {
-		t.Fatalf("failed to get service: %v", err)
+func loadIntegrationConfig(t *testing.T) integrationConfig {
+	t.Helper()
+	if os.Getenv("TRANSBANK_RUN_INTEGRATION_TESTS") != "1" {
+		t.Skip("integration tests disabled: set TRANSBANK_RUN_INTEGRATION_TESTS=1")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	cfg := integrationConfig{
+		BaseURL:      getEnv("TRANSBANK_BASE_URL", defaultIntegrationBaseURL),
+		CommerceCode: getEnv("TRANSBANK_COMMERCE_CODE", DefaultIntegrationCommerceCode),
+		APISecret:    getEnv("TRANSBANK_API_SECRET", DefaultIntegrationAPISecret),
+		ResponseURL:  getEnv("TRANSBANK_RESPONSE_URL", defaultIntegrationResponseURL),
+		EmailDomain:  getEnv("TRANSBANK_TEST_EMAIL_DOMAIN", "example.com"),
+		ChildCode:    getEnv("TRANSBANK_TEST_CHILD_COMMERCE_CODE", defaultIntegrationChildCode),
+		RunMutating:  os.Getenv("TRANSBANK_TEST_RUN_MUTATING") == "1",
+		Username:     strings.TrimSpace(os.Getenv("TRANSBANK_TEST_USERNAME")),
+		TbkUser:      strings.TrimSpace(os.Getenv("TRANSBANK_TEST_TBK_USER")),
+		FinishToken:  strings.TrimSpace(os.Getenv("TRANSBANK_TEST_FINISH_TOKEN")),
 
-	// Test: Invalid commerce code
-	t.Log("  Subtest 1: Invalid commerce code")
-	_, err = svc.Authorize(ctx, "user", "tbkuser", "order", []TransactionDetail{
-		{
-			CommerceCode:       "invalid",
-			BuyOrder:           "order",
-			Amount:             1000,
-			InstallmentsNumber: 0,
-		},
-	})
+		RemoveUsername: strings.TrimSpace(os.Getenv("TRANSBANK_TEST_REMOVE_USERNAME")),
+		RemoveTbkUser:  strings.TrimSpace(os.Getenv("TRANSBANK_TEST_REMOVE_TBK_USER")),
 
-	if err == nil {
-		t.Fatal("expected error for invalid commerce code")
+		CaptureCode:  strings.TrimSpace(os.Getenv("TRANSBANK_TEST_CAPTURE_COMMERCE_CODE")),
+		CaptureOrder: strings.TrimSpace(os.Getenv("TRANSBANK_TEST_CAPTURE_BUY_ORDER")),
+		CaptureAuth:  strings.TrimSpace(os.Getenv("TRANSBANK_TEST_CAPTURE_AUTH_CODE")),
 	}
-	t.Logf("  ✓ Correctly rejected: %v", err)
 
-	// Test: Empty buy order
-	t.Log("  Subtest 2: Empty buy order")
-	_, err = svc.Authorize(ctx, "user", "tbkuser", "", []TransactionDetail{
-		{
-			CommerceCode:       "597055555542",
-			BuyOrder:           "order",
-			Amount:             1000,
-			InstallmentsNumber: 0,
-		},
-	})
-
-	if err == nil {
-		t.Fatal("expected error for empty buy order")
+	amount, err := strconv.Atoi(getEnv("TRANSBANK_TEST_AMOUNT", "1000"))
+	if err != nil || amount <= 0 {
+		t.Fatalf("invalid TRANSBANK_TEST_AMOUNT: %v", err)
 	}
-	t.Logf("  ✓ Correctly rejected: %v", err)
+	cfg.Amount = amount
 
-	// Test: Invalid amount
-	t.Log("  Subtest 3: Invalid amount")
-	_, err = svc.Authorize(ctx, "user", "tbkuser", "order", []TransactionDetail{
-		{
-			CommerceCode:       "597055555542",
-			BuyOrder:           "order",
-			Amount:             0,
-			InstallmentsNumber: 0,
-		},
-	})
-
-	if err == nil {
-		t.Fatal("expected error for zero amount")
+	captureAmountValue := strings.TrimSpace(os.Getenv("TRANSBANK_TEST_CAPTURE_AMOUNT"))
+	if captureAmountValue != "" {
+		captureAmount, parseErr := strconv.Atoi(captureAmountValue)
+		if parseErr != nil {
+			t.Fatalf("invalid TRANSBANK_TEST_CAPTURE_AMOUNT: %v", parseErr)
+		}
+		cfg.CaptureAmount = captureAmount
 	}
-	t.Logf("  ✓ Correctly rejected: %v", err)
+
+	return cfg
 }
 
-// TestIntegrationServiceConfiguration tests environment detection
-func TestIntegrationServiceConfiguration(t *testing.T) {
-	t.Log("Test: Service configuration and environment detection")
-
-	// Integration service
-	integrationSvc, err := NewOneclickService(
-		"597055555541",
-		"579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C",
-		"https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
+func newIntegrationService(t *testing.T, cfg integrationConfig) *OneclickService {
+	t.Helper()
+	svc, err := newOneclickServiceWithBaseURL(
+		EnvironmentIntegration,
+		cfg.CommerceCode,
+		cfg.APISecret,
+		cfg.BaseURL,
 		nil,
 	)
 	if err != nil {
-		t.Fatalf("failed to create integration service: %v", err)
+		t.Fatalf("create service: %v", err)
 	}
-
-	if !integrationSvc.IsIntegrationEnvironment() {
-		t.Fatal("expected integration environment")
-	}
-	if integrationSvc.IsProduction() {
-		t.Fatal("should not be production")
-	}
-	t.Logf("✓ Integration environment correctly detected")
-
-	// Production service (for reference)
-	prodSvc, err := NewOneclickService(
-		"597055555541",
-		"579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C",
-		"https://webpay3g.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("failed to create production service: %v", err)
-	}
-
-	if prodSvc.IsIntegrationEnvironment() {
-		t.Fatal("should not be integration environment")
-	}
-	if !prodSvc.IsProduction() {
-		t.Fatal("expected production environment")
-	}
-	t.Logf("✓ Production environment correctly detected")
+	return svc
 }
 
-// Helper function to get integration service
-func getIntegrationService(t *testing.T) (*OneclickService, error) {
-	// Get credentials from environment or use defaults
-	commerceCode := os.Getenv("TRANSBANK_COMMERCE_CODE")
-	if commerceCode == "" {
-		commerceCode = "597055555541"
+func randomBuyOrder(prefix string) string {
+	value := fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	if len(value) > maxBuyOrderLength {
+		return value[:maxBuyOrderLength]
 	}
+	return value
+}
 
-	apiSecret := os.Getenv("TRANSBANK_API_SECRET")
-	if apiSecret == "" {
-		apiSecret = "579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C"
+func randomUsername(prefix string) string {
+	value := fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	if len(value) > maxUsernameLength {
+		return value[:maxUsernameLength]
 	}
+	return value
+}
 
-	baseURL := os.Getenv("TRANSBANK_BASE_URL")
-	if baseURL == "" {
-		baseURL = "https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2"
+func randomTbkUser() string {
+	value := fmt.Sprintf("it-fake-%d", time.Now().UnixNano())
+	if len(value) > maxTbkUserLength {
+		return value[:maxTbkUserLength]
 	}
+	return value
+}
 
-	t.Logf("Using Transbank Integration Credentials:")
-	t.Logf("  Commerce Code: %s", commerceCode)
-	t.Logf("  Base URL: %s", baseURL)
-
-	return NewOneclickService(commerceCode, apiSecret, baseURL, nil)
+func getEnv(key, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	return value
 }

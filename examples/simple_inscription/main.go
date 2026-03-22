@@ -15,13 +15,8 @@ import (
 // 2. Redirect user to Transbank
 // 3. Confirm the token after redirect
 func main() {
-	// Initialize service with integration environment
-	svc, err := oneclick.NewOneclickService(
-		"597055555541",
-		"579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C",
-		"https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
-		nil, // Use default HTTP client
-	)
+	// Initialize service with integration defaults (no configuration required).
+	svc, err := oneclick.NewOneclickService()
 	if err != nil {
 		log.Fatalf("Failed to create service: %v", err)
 	}

@@ -41,6 +41,7 @@ var (
 	ErrInvalidCommerceCode  = errors.New("invalid commerce code")
 	ErrInvalidAPISecret     = errors.New("invalid API secret")
 	ErrInvalidBaseURL       = errors.New("invalid base URL")
+	ErrInvalidEnvironment   = errors.New("invalid environment")
 	ErrNilHTTPClient        = errors.New("HTTP client cannot be nil")
 	ErrInvalidToken         = errors.New("invalid or empty token")
 	ErrInvalidBuyOrder      = errors.New("invalid or empty buy order")

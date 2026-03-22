@@ -12,61 +12,64 @@ import (
 	"time"
 )
 
+func newTestService(t *testing.T, baseURL string) *OneclickService {
+	t.Helper()
+	svc, err := newOneclickServiceWithBaseURL(
+		EnvironmentIntegration,
+		"597055555541",
+		"secret",
+		baseURL,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("create test service: %v", err)
+	}
+	return svc
+}
+
 func TestNewOneclickService(t *testing.T) {
 	tests := []struct {
 		name        string
+		environment Environment
 		commerce    string
 		secret      string
-		baseURL     string
 		expectError bool
 	}{
 		{
-			name:        "valid",
-			commerce:    "597055555541",
-			secret:      "secret",
-			baseURL:     "https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
+			name:        "defaults to integration test credentials",
 			expectError: false,
 		},
 		{
-			name:        "missing commerce code",
-			commerce:    "",
-			secret:      "secret",
-			baseURL:     "https://test.com",
+			name:        "production requires explicit credentials",
+			environment: EnvironmentProduction,
 			expectError: true,
 		},
 		{
-			name:        "missing secret",
-			commerce:    "597055555541",
-			secret:      "",
-			baseURL:     "https://test.com",
+			name:        "invalid environment",
+			environment: Environment("qa"),
 			expectError: true,
 		},
 		{
-			name:        "missing base url",
+			name:        "production with credentials",
+			environment: EnvironmentProduction,
 			commerce:    "597055555541",
 			secret:      "secret",
-			baseURL:     "",
-			expectError: true,
-		},
-		{
-			name:        "relative base url is invalid",
-			commerce:    "597055555541",
-			secret:      "secret",
-			baseURL:     "/relative/url",
-			expectError: true,
-		},
-		{
-			name:        "malformed base url",
-			commerce:    "597055555541",
-			secret:      "secret",
-			baseURL:     "ht!tp://invalid [url",
-			expectError: true,
+			expectError: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, err := NewOneclickService(tt.commerce, tt.secret, tt.baseURL, nil)
+			var (
+				svc *OneclickService
+				err error
+			)
+			if tt.name == "defaults to integration test credentials" {
+				svc, err = NewOneclickService()
+			} else {
+				svc, err = NewOneclickServiceFor(tt.environment, tt.commerce, tt.secret, nil)
+			}
+
 			if tt.expectError {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -79,12 +82,62 @@ func TestNewOneclickService(t *testing.T) {
 			if svc == nil {
 				t.Fatal("expected non-nil service")
 			}
+			if tt.name == "defaults to integration test credentials" {
+				if svc.CommerceCode() != DefaultIntegrationCommerceCode {
+					t.Fatalf("unexpected default commerce code: %s", svc.CommerceCode())
+				}
+			}
+		})
+	}
+}
+
+func TestNewOneclickServiceForBaseURLValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		baseURL     string
+		expectError bool
+	}{
+		{
+			name:        "valid absolute base url",
+			baseURL:     "https://example.com/api",
+			expectError: false,
+		},
+		{
+			name:        "relative base url is invalid",
+			baseURL:     "/relative/url",
+			expectError: true,
+		},
+		{
+			name:        "malformed base url",
+			baseURL:     "ht!tp://invalid [url",
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := newOneclickServiceWithBaseURL(
+				EnvironmentIntegration,
+				"597055555541",
+				"secret",
+				tt.baseURL,
+				nil,
+			)
+			if tt.expectError && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tt.expectError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 		})
 	}
 }
 
 func TestEnvironmentDetection(t *testing.T) {
-	integrationSvc, _ := NewOneclickService("597055555541", "secret", "https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2", nil)
+	integrationSvc, err := NewOneclickService()
+	if err != nil {
+		t.Fatalf("unexpected integration service error: %v", err)
+	}
 	if !integrationSvc.IsIntegrationEnvironment() {
 		t.Fatal("expected integration environment")
 	}
@@ -92,7 +145,10 @@ func TestEnvironmentDetection(t *testing.T) {
 		t.Fatal("integration service cannot be production")
 	}
 
-	prodSvc, _ := NewOneclickService("597055555541", "secret", "https://webpay3g.transbank.cl/rswebpaytransaction/api/oneclick/v1.2", nil)
+	prodSvc, err := NewOneclickServiceFor(EnvironmentProduction, "597055555541", "secret", nil)
+	if err != nil {
+		t.Fatalf("unexpected production service error: %v", err)
+	}
 	if prodSvc.IsIntegrationEnvironment() {
 		t.Fatal("expected production environment")
 	}
@@ -129,7 +185,7 @@ func TestStartRequestShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	svc := newTestService(t, server.URL)
 	resp, err := svc.Start(context.Background(), "user_123", "user@example.com", "https://merchant.com/return")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -164,7 +220,7 @@ func TestFinishRequestShapeAndResponseCode(t *testing.T) {
 		}))
 		defer server.Close()
 
-		svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+		svc := newTestService(t, server.URL)
 		resp, err := svc.Finish(context.Background(), token)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -180,7 +236,7 @@ func TestFinishRequestShapeAndResponseCode(t *testing.T) {
 		}))
 		defer server.Close()
 
-		svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+		svc := newTestService(t, server.URL)
 		_, err := svc.Finish(context.Background(), "token")
 		if err == nil {
 			t.Fatal("expected error")
@@ -215,7 +271,7 @@ func TestRemoveRequestShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	svc := newTestService(t, server.URL)
 	if err := svc.Remove(context.Background(), "tbk-user", "user_123"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -266,7 +322,7 @@ func TestAuthorizeRequestShapeAndNormalization(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	svc := newTestService(t, server.URL)
 	resp, err := svc.Authorize(context.Background(), "user_123", "tbk-user", "mall-order-1", []TransactionDetail{{
 		CommerceCode:       "597055555542",
 		BuyOrder:           "child-order-1",
@@ -296,7 +352,7 @@ func TestStatusEscapesPath(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	svc := newTestService(t, server.URL)
 	if _, err := svc.Status(context.Background(), "parent/order"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -321,7 +377,7 @@ func TestRefundRequestShapeAndReversedPayload(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	svc := newTestService(t, server.URL)
 	resp, err := svc.Refund(context.Background(), "parent/order", "597055555542", "child-order", 50000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -356,7 +412,7 @@ func TestCaptureRequestShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	svc := newTestService(t, server.URL)
 	resp, err := svc.Capture(context.Background(), "597055555542", "child-order", "1213", 50000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -373,7 +429,7 @@ func TestCaptureFailureReturnsTypedError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	svc := newTestService(t, server.URL)
 	_, err := svc.Capture(context.Background(), "597055555542", "child-order", "1213", 50000)
 	if err == nil {
 		t.Fatal("expected error")
@@ -395,7 +451,7 @@ func TestErrorMessageParsing(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	svc := newTestService(t, server.URL)
 	_, err := svc.Finish(context.Background(), "token")
 	if err == nil {
 		t.Fatal("expected error")
@@ -414,7 +470,7 @@ func TestErrorMessageParsing(t *testing.T) {
 }
 
 func TestValidationLimitsAndFormats(t *testing.T) {
-	svc, _ := NewOneclickService("597055555541", "secret", "https://example.com", nil)
+	svc := newTestService(t, "https://example.com")
 
 	tooLongUsername := strings.Repeat("a", maxUsernameLength+1)
 	_, err := svc.Start(context.Background(), tooLongUsername, "user@example.com", "https://merchant.com/return")
@@ -446,7 +502,7 @@ func TestContextCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, _ := NewOneclickService("597055555541", "secret", server.URL, nil)
+	svc := newTestService(t, server.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 

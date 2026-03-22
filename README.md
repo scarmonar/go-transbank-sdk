@@ -33,16 +33,32 @@ go get github.com/scarmonar/go-transbank-sdk
 ## Inicialización del servicio
 
 ```go
-svc, err := oneclick.NewOneclickService(
-	"597055555541", // Código comercio mall (padre)
+// Sin configuración: usa ambiente integración + credenciales públicas de prueba.
+svc, err := oneclick.NewOneclickService()
+if err != nil {
+	panic(err)
+}
+```
+
+Para producción, configura ambiente y credenciales explícitas:
+
+```go
+svc, err := oneclick.NewOneclickServiceFor(
+	oneclick.EnvironmentProduction,
+	"TU_COMMERCE_CODE",
 	"TU_API_KEY_SECRET",
-	"https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2", // Integración
 	nil, // http.Client opcional
 )
 if err != nil {
 	panic(err)
 }
 ```
+
+Constructor adicional:
+
+- `NewOneclickServiceFor(environment, commerceCode, apiSecret, httpClient)`
+- Si `environment` es integración y credenciales vacías, usa defaults de integración.
+- Si `environment` es producción, las credenciales son obligatorias.
 
 ## API pública
 
@@ -242,10 +258,94 @@ Producción:
 go test ./...
 ```
 
+### Pruebas de integración real (ambiente Transbank integración)
+
+La suite real está en `oneclick/integration_test.go` y cubre los 7 endpoints del API:
+
+- `Start` (éxito real)
+- `Finish` (flujo sin interacción cliente, esperado error)
+- `Remove` (usuario inexistente, esperado error)
+- `Authorize` (usuario inexistente, esperado rechazo/error)
+- `Status` (buy_order inexistente, esperado error)
+- `Refund` (transacción inexistente, esperado error)
+- `Capture` (transacción inexistente, esperado error)
+
+Además incluye escenarios opcionales `happy-path` con fixtures:
+
+- `Finish` exitoso con token real (`TRANSBANK_TEST_FINISH_TOKEN`)
+- `Authorize + Status + Refund` exitoso (`TRANSBANK_TEST_USERNAME` + `TRANSBANK_TEST_TBK_USER`)
+- `Capture` exitoso (`TRANSBANK_TEST_CAPTURE_*`)
+
+Por seguridad, las pruebas reales no se ejecutan por defecto.
+
+#### 1) Ejecutar smoke tests reales (no destructivos)
+
+```bash
+TRANSBANK_RUN_INTEGRATION_TESTS=1 go test ./oneclick -run TestIntegrationOneclick -v -count=1
+```
+
+#### 2) Ejecutar happy-path reales (mutantes)
+
+Requiere habilitar mutaciones explícitamente:
+
+```bash
+TRANSBANK_RUN_INTEGRATION_TESTS=1 \
+TRANSBANK_TEST_RUN_MUTATING=1 \
+go test ./oneclick -run 'HappyPath|WithFixture|RemoveWithFixture' -v -count=1
+```
+
+#### Variables disponibles
+
+```bash
+TRANSBANK_RUN_INTEGRATION_TESTS=1
+# Opcional: habilita pruebas que crean/eliminan/capturan transacciones reales
+TRANSBANK_TEST_RUN_MUTATING=1
+```
+
+Con defaults útiles para integración:
+
+- `TRANSBANK_RUN_INTEGRATION_TESTS=1` (obligatoria para ejecutar)
+- `TRANSBANK_BASE_URL` (default: `https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2`)
+- `TRANSBANK_COMMERCE_CODE` (default: `597055555541`)
+- `TRANSBANK_API_SECRET` (default: credencial pública de integración)
+- `TRANSBANK_RESPONSE_URL` (default: `https://example.com/oneclick/return`)
+- `TRANSBANK_TEST_EMAIL_DOMAIN` (default: `example.com`)
+- `TRANSBANK_TEST_CHILD_COMMERCE_CODE` (default: `597055555542`)
+- `TRANSBANK_TEST_AMOUNT` (default: `1000`)
+
+Para `Authorize + Status + Refund` happy-path:
+
+- `TRANSBANK_TEST_USERNAME` (username usado al inscribir la tarjeta)
+- `TRANSBANK_TEST_TBK_USER` (tbk_user de esa inscripción)
+
+Para `Finish` happy-path:
+
+- `TRANSBANK_TEST_FINISH_TOKEN` (token recién retornado por Webpay luego de completar inscripción)
+
+Para `Remove` happy-path:
+
+- `TRANSBANK_TEST_REMOVE_USERNAME`
+- `TRANSBANK_TEST_REMOVE_TBK_USER`
+
+Para `Capture` happy-path:
+
+- `TRANSBANK_TEST_CAPTURE_COMMERCE_CODE`
+- `TRANSBANK_TEST_CAPTURE_BUY_ORDER`
+- `TRANSBANK_TEST_CAPTURE_AUTH_CODE`
+- `TRANSBANK_TEST_CAPTURE_AMOUNT`
+
+Notas:
+
+- Si faltan variables para un escenario, ese test se marca como `SKIP`.
+- Los tests generan órdenes de compra únicas en cada ejecución.
+- Los tests `happy-path` deben correr sobre datos de prueba dedicados para evitar afectar otros flujos.
+
 ## Recomendaciones de seguridad
 
-- No hardcodear credenciales en código fuente.
-- Usar variables de entorno o un secret manager.
+- Las credenciales embebidas del SDK son **solo** para ambiente de integración (testing).
+- En producción, usar `NewOneclickServiceFor(...)` con secretos externos.
+- No hardcodear credenciales de producción en código fuente.
+- Usar variables de entorno o un secret manager para producción.
 - Rotar credenciales si se exponen accidentalmente.
 
 ## Referencias

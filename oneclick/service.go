@@ -21,42 +21,89 @@ const (
 	maxCommerceCodeLength      = 12
 	maxAuthorizationCodeLength = 6
 	maxInstallmentsNumber      = 99
+
+	defaultIntegrationBaseURL = "https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2"
+	defaultProductionBaseURL  = "https://webpay3g.transbank.cl/rswebpaytransaction/api/oneclick/v1.2"
 )
+
+const (
+	// DefaultIntegrationCommerceCode is the public commerce code for Transbank integration testing.
+	DefaultIntegrationCommerceCode = "597055555541"
+	// DefaultIntegrationAPISecret is the public API secret for Transbank integration testing.
+	DefaultIntegrationAPISecret = "579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C"
+)
+
+// Environment identifies the target Oneclick API environment.
+type Environment string
+
+const (
+	// EnvironmentIntegration points to Transbank integration endpoints.
+	EnvironmentIntegration Environment = "integration"
+	// EnvironmentProduction points to Transbank production endpoints.
+	EnvironmentProduction Environment = "production"
+)
+
+// IsValid returns true when the environment value is recognized.
+func (e Environment) IsValid() bool {
+	return e == EnvironmentIntegration || e == EnvironmentProduction
+}
 
 // OneclickService provides methods to interact with the Transbank Oneclick API.
 type OneclickService struct {
 	commerceCode string
 	apiSecret    string
 	baseURL      string
+	environment  Environment
 	httpClient   *http.Client
 }
 
-// NewOneclickService creates a new Transbank Oneclick service.
-// commerceCode: parent commerce code (for example: "597055555541")
-// apiSecret: API secret key for authentication
-// baseURL: API base URL (integration or production)
-// httpClient: HTTP client to use for requests (if nil, a client with 30s timeout is used)
-func NewOneclickService(commerceCode, apiSecret, baseURL string, httpClient *http.Client) (*OneclickService, error) {
+// NewOneclickService creates a Oneclick service preconfigured for integration.
+// It uses Transbank public integration credentials and integration base URL.
+func NewOneclickService() (*OneclickService, error) {
+	return NewOneclickServiceFor(EnvironmentIntegration, "", "", nil)
+}
+
+// NewOneclickServiceFor creates a Oneclick service for the requested environment.
+//
+// Rules:
+// - environment "" is treated as integration.
+// - integration + empty credentials uses public integration defaults.
+// - production requires explicit credentials.
+func NewOneclickServiceFor(environment Environment, commerceCode, apiSecret string, httpClient *http.Client) (*OneclickService, error) {
+	resolvedEnvironment, err := resolveEnvironment(environment)
+	if err != nil {
+		return nil, err
+	}
+
+	commerceCode = strings.TrimSpace(commerceCode)
+	apiSecret = strings.TrimSpace(apiSecret)
+	if resolvedEnvironment == EnvironmentIntegration && commerceCode == "" && apiSecret == "" {
+		commerceCode = DefaultIntegrationCommerceCode
+		apiSecret = DefaultIntegrationAPISecret
+	}
+
+	return newOneclickServiceWithBaseURL(
+		resolvedEnvironment,
+		commerceCode,
+		apiSecret,
+		baseURLForEnvironment(resolvedEnvironment),
+		httpClient,
+	)
+}
+
+func newOneclickServiceWithBaseURL(environment Environment, commerceCode, apiSecret, baseURL string, httpClient *http.Client) (*OneclickService, error) {
+	if !environment.IsValid() {
+		return nil, ErrInvalidEnvironment
+	}
 	if err := validateCommerceCode(commerceCode); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(apiSecret) == "" {
 		return nil, ErrInvalidAPISecret
 	}
-
-	baseURL = strings.TrimSpace(baseURL)
-	if baseURL == "" {
-		return nil, ErrInvalidBaseURL
+	if err := validateBaseURL(baseURL); err != nil {
+		return nil, err
 	}
-
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse base URL: %w", err)
-	}
-	if u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("base URL must be absolute: %w", ErrInvalidBaseURL)
-	}
-
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -65,6 +112,7 @@ func NewOneclickService(commerceCode, apiSecret, baseURL string, httpClient *htt
 		commerceCode: strings.TrimSpace(commerceCode),
 		apiSecret:    strings.TrimSpace(apiSecret),
 		baseURL:      strings.TrimSuffix(baseURL, "/"),
+		environment:  environment,
 		httpClient:   httpClient,
 	}, nil
 }
@@ -76,13 +124,12 @@ func (s *OneclickService) CommerceCode() string {
 
 // IsIntegrationEnvironment returns true if the service appears configured for integration.
 func (s *OneclickService) IsIntegrationEnvironment() bool {
-	base := strings.ToLower(s.baseURL)
-	return strings.Contains(base, "int") || strings.Contains(base, "test") || strings.Contains(base, "integration")
+	return s.environment == EnvironmentIntegration
 }
 
 // IsProduction returns true if the service appears configured for production.
 func (s *OneclickService) IsProduction() bool {
-	return !s.IsIntegrationEnvironment()
+	return s.environment == EnvironmentProduction
 }
 
 // Start initiates a new inscription and returns token + Webpay redirect URL.
@@ -439,6 +486,40 @@ func validateResponseURL(responseURL string) error {
 	u, err := url.Parse(responseURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return ErrEmptyResponseURL
+	}
+
+	return nil
+}
+
+func resolveEnvironment(environment Environment) (Environment, error) {
+	if environment == "" {
+		return EnvironmentIntegration, nil
+	}
+	if !environment.IsValid() {
+		return "", ErrInvalidEnvironment
+	}
+	return environment, nil
+}
+
+func baseURLForEnvironment(environment Environment) string {
+	if environment == EnvironmentProduction {
+		return defaultProductionBaseURL
+	}
+	return defaultIntegrationBaseURL
+}
+
+func validateBaseURL(baseURL string) error {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return ErrInvalidBaseURL
+	}
+
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("parse base URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("base URL must be absolute: %w", ErrInvalidBaseURL)
 	}
 
 	return nil

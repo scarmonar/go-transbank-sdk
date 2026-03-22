@@ -11,12 +11,7 @@ import (
 
 // Example: simple Oneclick Mall charge flow.
 func main() {
-	svc, err := oneclick.NewOneclickService(
-		"597055555541",
-		"579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C",
-		"https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
-		nil,
-	)
+	svc, err := oneclick.NewOneclickService()
 	if err != nil {
 		log.Fatalf("failed to create service: %v", err)
 	}
