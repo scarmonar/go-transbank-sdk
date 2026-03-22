@@ -3,14 +3,17 @@
 Esta guía describe la suite de pruebas reales contra el ambiente de integración de Transbank para Oneclick Mall v1.2.
 
 Fuente oficial de contrato:
+
 - https://www.transbankdevelopers.cl/referencia/oneclick
 
 ## Estado actual de la suite
 
 Archivo de tests:
+
 - `oneclick/integration_test.go`
 
 Cobertura actual:
+
 - 11 tests de integración real
 - 7 operaciones del API cubiertas (`Start`, `Finish`, `Remove`, `Authorize`, `Status`, `Refund`, `Capture`)
 - smoke tests no destructivos + escenarios mutantes con fixtures
@@ -22,6 +25,7 @@ Cobertura actual:
 - Variable `TRANSBANK_RUN_INTEGRATION_TESTS=1` para habilitar ejecución
 
 Credenciales por defecto usadas por la suite:
+
 - Comercio mall: `597055555541`
 - API Secret: `579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C`
 - Base URL: `https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2`
@@ -81,17 +85,21 @@ go test ./oneclick -run 'HappyPath|WithFixture|RemoveWithFixture' -v -count=1
 ### Fixtures por escenario
 
 Finish exitoso:
+
 - `TRANSBANK_TEST_FINISH_TOKEN`
 
 Remove exitoso:
+
 - `TRANSBANK_TEST_REMOVE_USERNAME`
 - `TRANSBANK_TEST_REMOVE_TBK_USER`
 
 Authorize + Status + Refund happy-path:
+
 - `TRANSBANK_TEST_USERNAME`
 - `TRANSBANK_TEST_TBK_USER`
 
 Capture exitosa:
+
 - `TRANSBANK_TEST_CAPTURE_COMMERCE_CODE`
 - `TRANSBANK_TEST_CAPTURE_BUY_ORDER`
 - `TRANSBANK_TEST_CAPTURE_AUTH_CODE`
