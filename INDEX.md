@@ -3,9 +3,9 @@
 ## Documentación principal
 
 - `README.md`
-  - Guía general del SDK Oneclick Mall v1.2.
-  - Arquitectura v1.2.0: `Client` (raw) + `FlowService` (alto nivel).
-  - Nuevos flujos de cargo/reversa de alto nivel y clasificación estable de errores.
+  - Guía general del SDK Oneclick Mall v1.2.1.
+  - Arquitectura v1.2.x: `Client` (raw) + `FlowService` (alto nivel).
+  - Nuevos flujos de cargo/reversa de alto nivel, clasificación estable de errores y helper de rechazo por `response_code`.
   - Configuración, opciones, errores tipados, observabilidad y ejemplos.
 
 - `INTEGRATION_TESTS.md`
@@ -38,6 +38,9 @@
 - `oneclick/errors.go`
   - `SDKError` tipado + `TransbankError`.
   - Helper `ClassifyError(err)`.
+
+- `oneclick/response_codes.go`
+  - `ClassifyResponseCode(code)` para traducir rechazos de Transbank a mensajes de negocio.
 
 - `oneclick/types.go`
   - Tipos de request/response.

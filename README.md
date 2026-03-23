@@ -1,12 +1,18 @@
 # go-transbank-sdk
 
-SDK en Go para **Transbank Oneclick Mall v1.2** con dos niveles de API:
+SDK en Go para **Transbank Oneclick Mall v1.2.1** con dos niveles de API:
 
 - `oneclick.Client`: cliente raw (contrato Transbank 1:1).
 - `oneclick.FlowService`: capa opinionated para flujo completo de inscripción.
 
 Fuente oficial del contrato API:
 - https://www.transbankdevelopers.cl/referencia/oneclick
+
+## Novedades v1.2.1
+
+- Nuevo helper público `ClassifyResponseCode(code)` para traducir `response_code` de Transbank a mensajes listos para UI.
+- El helper cubre los rechazos documentados por Oneclick (`-96`, `-97`, `-98`, `-99`) y agrega fallback genérico para códigos no reconocidos.
+- Documentación de rechazo actualizada para que el integrador pueda mostrar un mensaje más útil al usuario final.
 
 ## Novedades v1.2.0
 
@@ -268,6 +274,30 @@ fmt.Println(classification.Code)            // validation | transport | gateway 
 fmt.Println(classification.Retryable)       // true/false
 fmt.Println(classification.UserSafeMessage) // mensaje listo para UI
 ```
+
+## Rechazos y `response_code`
+
+Los endpoints de autorización de Transbank exponen el motivo del rechazo principalmente a través de `response_code`.
+Para mostrar un mensaje de negocio al usuario, usa `ClassifyResponseCode(code)`:
+
+```go
+detail := authResp.Details[0]
+rejection := oneclick.ClassifyResponseCode(detail.ResponseCode)
+
+if !rejection.Approved {
+	fmt.Println(rejection.Reason)
+	fmt.Println(rejection.UserSafeMessage)
+}
+```
+
+Valores conocidos:
+
+- `0`: transacción aprobada
+- `-96`: `tbk_user` inexistente
+- `-97`: excediste el monto diario permitido
+- `-98`: excediste el monto máximo permitido
+- `-99`: excediste la cantidad diaria permitida de pagos
+- otros valores: fallback genérico seguro para UI
 
 ## Observabilidad y Métricas
 

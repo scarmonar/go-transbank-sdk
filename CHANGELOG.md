@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.2.1 - 2026-03-23
+
+### Added
+
+- Helper público `ClassifyResponseCode(code)` para traducir `response_code` de Transbank a una clasificación estable y un mensaje apto para UI.
+- Cobertura explícita de los rechazos Oneclick documentados por Transbank:
+  - `-96`: `tbk_user` no existente
+  - `-97`: límite diario de monto excedido
+  - `-98`: límite de monto excedido
+  - `-99`: límite diario de cantidad de pagos excedido
+- Documentación de uso para mostrar al usuario por qué una tarjeta fue rechazada.
+
+### Changed
+
+- Se mantiene el contrato raw existente; el cambio es aditivo y compatible.
+- Se actualiza el README e índice con la nueva guía de `response_code`.
+
+### Compatibility
+
+- Release patch aditiva: no se eliminan ni renombran APIs existentes.
+- El fallback para códigos no reconocidos sigue siendo seguro para UI.
+
 ## v1.2.0 - 2026-03-23
 
 ### Added
