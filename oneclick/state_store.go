@@ -411,7 +411,21 @@ func cloneIdempotencyRecord(record IdempotencyRecord) IdempotencyRecord {
 	if record.ConfirmResponse != nil {
 		copied := *record.ConfirmResponse
 		copied.State = cloneFlowState(copied.State)
+		copied.Context = cloneStringMap(copied.Context)
 		cloned.ConfirmResponse = &copied
+	}
+	if record.AuthorizeChargeResponse != nil {
+		copied := *record.AuthorizeChargeResponse
+		copied.Details = append([]TransactionResponseDetail(nil), copied.Details...)
+		if copied.State != nil {
+			stateCopy := cloneFlowState(*copied.State)
+			copied.State = &stateCopy
+		}
+		cloned.AuthorizeChargeResponse = &copied
+	}
+	if record.ReverseChargeResponse != nil {
+		copied := *record.ReverseChargeResponse
+		cloned.ReverseChargeResponse = &copied
 	}
 	return cloned
 }

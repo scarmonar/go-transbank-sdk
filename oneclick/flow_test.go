@@ -2,12 +2,15 @@ package oneclick
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func newTestClientWithOptions(t *testing.T, baseURL string, opts ...Option) *Client {
@@ -16,7 +19,7 @@ func newTestClientWithOptions(t *testing.T, baseURL string, opts ...Option) *Cli
 	cfg.Environment = EnvironmentIntegration
 	cfg.CommerceCode = DefaultIntegrationCommerceCode
 	cfg.APISecret = "secret"
-	cfg.BaseURL = baseURL
+	cfg.baseURL = baseURL
 
 	client, err := NewClientWithConfig(cfg, opts...)
 	if err != nil {
@@ -217,5 +220,290 @@ func TestClientHooks(t *testing.T) {
 	}
 	if before.RequestID != after.RequestID {
 		t.Fatalf("expected same request ID across hooks: %s != %s", before.RequestID, after.RequestID)
+	}
+}
+
+func TestFlowConfirmResponseIncludesExpandedContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/inscriptions":
+			_, _ = w.Write([]byte(`{"token":"token-ctx","url_webpay":"https://webpay.example.com/form"}`))
+		case r.Method == http.MethodPut && r.URL.EscapedPath() == "/inscriptions/token-ctx":
+			_, _ = w.Write([]byte(`{"response_code":0,"tbk_user":"tbk-user-ctx","authorization_code":"1213","card_type":"Visa","card_number":"XXXX6623"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	store := NewInMemoryStateStore()
+	client := newTestClientWithOptions(t, server.URL)
+	flow, err := NewFlowService(client, store)
+	if err != nil {
+		t.Fatalf("create flow service: %v", err)
+	}
+
+	startResp, err := flow.StartInscription(context.Background(), FlowStartRequest{
+		Username:       "user_ctx",
+		Email:          "ctx@example.com",
+		BaseURL:        "https://merchant.cl",
+		ReturnPath:     "/return",
+		BusinessID:     "biz-ctx",
+		SubscriptionID: "sub-ctx",
+		Context: map[string]string{
+			"tenant": "tenant-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("start flow: %v", err)
+	}
+
+	confirmResp, err := flow.ConfirmInscription(context.Background(), FlowConfirmRequest{Token: startResp.Token})
+	if err != nil {
+		t.Fatalf("confirm flow: %v", err)
+	}
+	if confirmResp.BusinessID != "biz-ctx" || confirmResp.SubscriptionID != "sub-ctx" {
+		t.Fatalf("missing expanded context fields: %+v", confirmResp)
+	}
+	if confirmResp.Context["tenant"] != "tenant-1" {
+		t.Fatalf("unexpected context: %+v", confirmResp.Context)
+	}
+
+	confirmResp.Context["tenant"] = "mutated"
+	stored, err := store.GetByToken(context.Background(), startResp.Token)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if stored.Context["tenant"] != "tenant-1" {
+		t.Fatalf("expected cloned context map, got state=%+v", stored.Context)
+	}
+}
+
+func TestFlowServiceAuthorizeChargeFromTokenWithIdempotency(t *testing.T) {
+	var authorizeCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/inscriptions":
+			_, _ = w.Write([]byte(`{"token":"token-charge","url_webpay":"https://webpay.example.com/form"}`))
+		case r.Method == http.MethodPut && r.URL.EscapedPath() == "/inscriptions/token-charge":
+			_, _ = w.Write([]byte(`{"response_code":0,"tbk_user":"tbk-user-charge","authorization_code":"1213","card_type":"Visa","card_number":"XXXX6623"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/transactions":
+			atomic.AddInt32(&authorizeCalls, 1)
+			var req AuthorizeTransactionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if req.Username != "flow_user" || req.TbkUser != "tbk-user-charge" || req.BuyOrder != "mall-charge-1" {
+				t.Fatalf("unexpected authorize payload: %+v", req)
+			}
+			_ = json.NewEncoder(w).Encode(AuthorizeTransactionResponse{
+				BuyOrder:        req.BuyOrder,
+				TransactionDate: time.Date(2026, 3, 23, 10, 0, 0, 0, time.UTC),
+				Details: []TransactionResponseDetail{{
+					CommerceCode: "597055555542",
+					BuyOrder:     "child-order-1",
+					Amount:       1000,
+					Status:       TransactionStatusAuthorized,
+				}},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClientWithOptions(t, server.URL)
+	flow, err := NewFlowService(client, NewInMemoryStateStore())
+	if err != nil {
+		t.Fatalf("create flow service: %v", err)
+	}
+
+	startResp, err := flow.StartInscription(context.Background(), FlowStartRequest{
+		Username:   "flow_user",
+		Email:      "flow@example.com",
+		BaseURL:    "https://merchant.cl",
+		ReturnPath: "/return",
+	})
+	if err != nil {
+		t.Fatalf("start flow: %v", err)
+	}
+	if _, err := flow.ConfirmInscription(context.Background(), FlowConfirmRequest{Token: startResp.Token}); err != nil {
+		t.Fatalf("confirm flow: %v", err)
+	}
+
+	req := FlowAuthorizeChargeRequest{
+		TokenOrTbkUser: startResp.Token,
+		BuyOrder:       "mall-charge-1",
+		Details: []TransactionDetail{{
+			CommerceCode: "597055555542",
+			BuyOrder:     "child-order-1",
+			Amount:       1000,
+		}},
+		IdempotencyKey: "idem-auth-1",
+	}
+	resp, err := flow.AuthorizeCharge(context.Background(), req)
+	if err != nil {
+		t.Fatalf("authorize charge: %v", err)
+	}
+	if resp.State == nil || resp.State.Token != startResp.Token || resp.BuyOrder != "mall-charge-1" {
+		t.Fatalf("unexpected authorize response: %+v", resp)
+	}
+
+	cached, err := flow.AuthorizeCharge(context.Background(), req)
+	if err != nil {
+		t.Fatalf("authorize charge cached: %v", err)
+	}
+	if cached.BuyOrder != resp.BuyOrder {
+		t.Fatalf("unexpected cached response: %+v", cached)
+	}
+	if got := atomic.LoadInt32(&authorizeCalls); got != 1 {
+		t.Fatalf("expected one authorize call, got %d", got)
+	}
+}
+
+func TestFlowServiceAuthorizeChargeValidationAndGatewayError(t *testing.T) {
+	client := newTestClientWithOptions(t, "https://example.com")
+	flow, err := NewFlowService(client, NewInMemoryStateStore())
+	if err != nil {
+		t.Fatalf("create flow service: %v", err)
+	}
+
+	_, err = flow.AuthorizeCharge(context.Background(), FlowAuthorizeChargeRequest{
+		TokenOrTbkUser: "tbk-user-direct",
+		BuyOrder:       "mall-order-1",
+		Details: []TransactionDetail{{
+			CommerceCode: "597055555542",
+			BuyOrder:     "child-order-1",
+			Amount:       1000,
+		}},
+	})
+	if err == nil || !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected validation error, got %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error_message":"upstream unavailable"}`))
+	}))
+	defer server.Close()
+
+	clientGateway := newTestClientWithOptions(t, server.URL)
+	flowGateway, err := NewFlowService(clientGateway, NewInMemoryStateStore())
+	if err != nil {
+		t.Fatalf("create flow service: %v", err)
+	}
+
+	_, err = flowGateway.AuthorizeCharge(context.Background(), FlowAuthorizeChargeRequest{
+		TokenOrTbkUser: "tbk-user-direct",
+		Username:       "user_direct",
+		BuyOrder:       "mall-order-1",
+		Details: []TransactionDetail{{
+			CommerceCode: "597055555542",
+			BuyOrder:     "child-order-1",
+			Amount:       1000,
+		}},
+	})
+	if err == nil || !errors.Is(err, ErrGateway) {
+		t.Fatalf("expected gateway error, got %v", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestFlowServiceReverseChargeHooksAndTransportError(t *testing.T) {
+	var mu sync.Mutex
+	seenBefore := map[string]RequestEvent{}
+	seenAfter := map[string]ResponseEvent{}
+
+	var reverseCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/transactions/mall-order-1/refunds" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		atomic.AddInt32(&reverseCalls, 1)
+		_ = json.NewEncoder(w).Encode(RefundResponse{Type: "REVERSED", ResponseCode: 0})
+	}))
+	defer server.Close()
+
+	client := newTestClientWithOptions(t, server.URL, WithHooks(Hooks{
+		BeforeRequest: func(_ context.Context, event RequestEvent) {
+			mu.Lock()
+			seenBefore[event.Operation] = event
+			mu.Unlock()
+		},
+		AfterRequest: func(_ context.Context, event ResponseEvent) {
+			mu.Lock()
+			seenAfter[event.Operation] = event
+			mu.Unlock()
+		},
+	}))
+	flow, err := NewFlowService(client, NewInMemoryStateStore())
+	if err != nil {
+		t.Fatalf("create flow service: %v", err)
+	}
+
+	reverseReq := FlowReverseChargeRequest{
+		BuyOrder:       "mall-order-1",
+		CommerceCode:   "597055555542",
+		DetailBuyOrder: "child-order-1",
+		Amount:         1000,
+		IdempotencyKey: "idem-reverse-1",
+	}
+	resp, err := flow.ReverseCharge(context.Background(), reverseReq)
+	if err != nil {
+		t.Fatalf("reverse charge: %v", err)
+	}
+	if resp.Refund.Type != "REVERSED" {
+		t.Fatalf("unexpected reverse response: %+v", resp)
+	}
+	if _, err := flow.ReverseCharge(context.Background(), reverseReq); err != nil {
+		t.Fatalf("reverse charge cached: %v", err)
+	}
+	if got := atomic.LoadInt32(&reverseCalls); got != 1 {
+		t.Fatalf("expected one reverse call, got %d", got)
+	}
+
+	mu.Lock()
+	before := seenBefore[idempotencyOpReverseCharge]
+	after := seenAfter[idempotencyOpReverseCharge]
+	mu.Unlock()
+	if before.RequestID == "" || after.RequestID == "" {
+		t.Fatalf("expected request ids in flow hooks: before=%+v after=%+v", before, after)
+	}
+	if before.RequestID != after.RequestID {
+		t.Fatalf("expected correlable request IDs, got %s vs %s", before.RequestID, after.RequestID)
+	}
+
+	transportClient := newTestClientWithOptions(
+		t,
+		"https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2",
+		WithHTTPClient(&http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, &net.DNSError{IsTemporary: true}
+			}),
+		}),
+		WithRetryPolicy(RetryPolicy{
+			MaxAttempts:    1,
+			InitialBackoff: time.Millisecond,
+			MaxBackoff:     time.Millisecond,
+			RetryOnStatus:  map[int]struct{}{http.StatusBadGateway: {}},
+		}),
+	)
+	transportFlow, err := NewFlowService(transportClient, NewInMemoryStateStore())
+	if err != nil {
+		t.Fatalf("create flow service: %v", err)
+	}
+	_, err = transportFlow.ReverseCharge(context.Background(), FlowReverseChargeRequest{
+		BuyOrder:       "mall-order-1",
+		CommerceCode:   "597055555542",
+		DetailBuyOrder: "child-order-1",
+		Amount:         1000,
+	})
+	if err == nil || !errors.Is(err, ErrTransport) {
+		t.Fatalf("expected transport error, got %v", err)
 	}
 }

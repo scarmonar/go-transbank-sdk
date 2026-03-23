@@ -7,11 +7,14 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 const (
-	idempotencyOpStart   = "start_inscription"
-	idempotencyOpConfirm = "confirm_inscription"
+	idempotencyOpStart           = "start_inscription"
+	idempotencyOpConfirm         = "confirm_inscription"
+	idempotencyOpAuthorizeCharge = "flow_authorize_charge"
+	idempotencyOpReverseCharge   = "flow_reverse_charge"
 )
 
 // ReturnURLMode controls URL validation strictness when building return URLs.
@@ -65,10 +68,12 @@ type StateStore interface {
 
 // IdempotencyRecord stores cached results for idempotent operations.
 type IdempotencyRecord struct {
-	Operation       string
-	Key             string
-	StartResponse   *FlowStartResponse
-	ConfirmResponse *FlowConfirmResponse
+	Operation               string
+	Key                     string
+	StartResponse           *FlowStartResponse
+	ConfirmResponse         *FlowConfirmResponse
+	AuthorizeChargeResponse *FlowAuthorizeChargeResponse
+	ReverseChargeResponse   *FlowReverseChargeResponse
 }
 
 // IdempotencyStore resolves repeated requests by operation + key.
@@ -107,8 +112,45 @@ type FlowConfirmRequest struct {
 
 // FlowConfirmResponse is returned by FlowService.ConfirmInscription.
 type FlowConfirmResponse struct {
-	State        FlowState                  `json:"state"`
-	Confirmation InscriptionConfirmResponse `json:"confirmation"`
+	State          FlowState                  `json:"state"`
+	Confirmation   InscriptionConfirmResponse `json:"confirmation"`
+	BusinessID     string                     `json:"business_id,omitempty"`
+	SubscriptionID string                     `json:"subscription_id,omitempty"`
+	Context        map[string]string          `json:"context,omitempty"`
+}
+
+// FlowAuthorizeChargeRequest describes the high-level authorize input.
+// TokenOrTbkUser accepts either:
+// - a flow token to resolve tbk_user and username from confirmed state, or
+// - a tbk_user value directly.
+type FlowAuthorizeChargeRequest struct {
+	TokenOrTbkUser string
+	Username       string
+	BuyOrder       string
+	Details        []TransactionDetail
+	IdempotencyKey string
+}
+
+// FlowAuthorizeChargeResponse contains normalized authorization data.
+type FlowAuthorizeChargeResponse struct {
+	BuyOrder        string                      `json:"buy_order"`
+	TransactionDate time.Time                   `json:"transaction_date"`
+	Details         []TransactionResponseDetail `json:"details"`
+	State           *FlowState                  `json:"state,omitempty"`
+}
+
+// FlowReverseChargeRequest describes high-level reverse/refund input.
+type FlowReverseChargeRequest struct {
+	BuyOrder       string
+	CommerceCode   string
+	DetailBuyOrder string
+	Amount         int
+	IdempotencyKey string
+}
+
+// FlowReverseChargeResponse contains reverse/refund output.
+type FlowReverseChargeResponse struct {
+	Refund RefundResponse `json:"refund"`
 }
 
 // FlowOption customizes FlowService behavior.
@@ -279,6 +321,8 @@ const httpMethodPost = "POST"
 
 // StartInscription orchestrates inscription start + state persistence + idempotency.
 func (s *FlowService) StartInscription(ctx context.Context, req FlowStartRequest) (*FlowStartResponse, error) {
+	ctx = s.client.contextWithRequestMeta(ctx, "")
+
 	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
 	if idempotencyKey != "" {
 		record, err := s.idempotency.Get(ctx, idempotencyOpStart, idempotencyKey)
@@ -361,6 +405,8 @@ func (s *FlowService) StartInscription(ctx context.Context, req FlowStartRequest
 
 // ConfirmInscription resolves token context, confirms inscription and updates state.
 func (s *FlowService) ConfirmInscription(ctx context.Context, req FlowConfirmRequest) (*FlowConfirmResponse, error) {
+	ctx = s.client.contextWithRequestMeta(ctx, "")
+
 	token := strings.TrimSpace(req.Token)
 	if token == "" {
 		return nil, NewValidationError("token is required", ErrInvalidToken)
@@ -375,6 +421,7 @@ func (s *FlowService) ConfirmInscription(ctx context.Context, req FlowConfirmReq
 		if record != nil && record.ConfirmResponse != nil {
 			cached := *record.ConfirmResponse
 			cached.State = cloneFlowState(cached.State)
+			cached.Context = cloneStringMap(cached.Context)
 			return &cached, nil
 		}
 	}
@@ -388,10 +435,7 @@ func (s *FlowService) ConfirmInscription(ctx context.Context, req FlowConfirmReq
 	}
 
 	if state.Status == FlowStatusConfirmed && state.Confirmation != nil {
-		response := &FlowConfirmResponse{
-			State:        cloneFlowState(*state),
-			Confirmation: *state.Confirmation,
-		}
+		response := flowConfirmResponseFromState(*state)
 		return response, nil
 	}
 
@@ -408,10 +452,7 @@ func (s *FlowService) ConfirmInscription(ctx context.Context, req FlowConfirmReq
 		return nil, NewFlowStateError("mark flow as confirmed", true, err)
 	}
 
-	response := &FlowConfirmResponse{
-		State:        cloneFlowState(*updated),
-		Confirmation: *confirmation,
-	}
+	response := flowConfirmResponseFromState(*updated)
 
 	if idempotencyKey != "" {
 		err := s.idempotency.Save(ctx, IdempotencyRecord{
@@ -425,6 +466,195 @@ func (s *FlowService) ConfirmInscription(ctx context.Context, req FlowConfirmReq
 	}
 
 	return response, nil
+}
+
+// AuthorizeCharge resolves identity from flow state when possible and authorizes a charge.
+func (s *FlowService) AuthorizeCharge(ctx context.Context, req FlowAuthorizeChargeRequest) (*FlowAuthorizeChargeResponse, error) {
+	ctx = s.client.contextWithRequestMeta(ctx, idempotencyOpAuthorizeCharge)
+
+	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
+	if idempotencyKey != "" {
+		record, err := s.idempotency.Get(ctx, idempotencyOpAuthorizeCharge, idempotencyKey)
+		if err != nil {
+			return nil, NewFlowStateError("idempotency lookup failed", true, err)
+		}
+		if record != nil && record.AuthorizeChargeResponse != nil {
+			cached := *record.AuthorizeChargeResponse
+			if cached.State != nil {
+				state := cloneFlowState(*cached.State)
+				cached.State = &state
+			}
+			cached.Details = append([]TransactionResponseDetail(nil), cached.Details...)
+			return &cached, nil
+		}
+	}
+
+	username, tbkUser, resolvedState, err := s.resolveChargeIdentity(ctx, req.TokenOrTbkUser, req.Username)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateBuyOrder(req.BuyOrder); err != nil {
+		return nil, NewValidationError("invalid buy_order", err)
+	}
+	if _, err := normalizeAndValidateDetails(req.Details); err != nil {
+		return nil, NewValidationError("invalid transaction details", err)
+	}
+
+	rawResp, err := s.client.AuthorizeTransaction(ctx, AuthorizeTransactionRequest{
+		Username: username,
+		TbkUser:  tbkUser,
+		BuyOrder: req.BuyOrder,
+		Details:  req.Details,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FlowAuthorizeChargeResponse{
+		BuyOrder:        rawResp.BuyOrder,
+		TransactionDate: rawResp.TransactionDate,
+		Details:         append([]TransactionResponseDetail(nil), rawResp.Details...),
+	}
+	if resolvedState != nil {
+		cloned := cloneFlowState(*resolvedState)
+		response.State = &cloned
+	}
+
+	if idempotencyKey != "" {
+		if err := s.idempotency.Save(ctx, IdempotencyRecord{
+			Operation:               idempotencyOpAuthorizeCharge,
+			Key:                     idempotencyKey,
+			AuthorizeChargeResponse: response,
+		}); err != nil {
+			return nil, NewFlowStateError("save idempotency record", true, err)
+		}
+	}
+
+	return response, nil
+}
+
+// ReverseCharge performs a reverse/refund operation.
+func (s *FlowService) ReverseCharge(ctx context.Context, req FlowReverseChargeRequest) (*FlowReverseChargeResponse, error) {
+	ctx = s.client.contextWithRequestMeta(ctx, idempotencyOpReverseCharge)
+
+	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
+	if idempotencyKey != "" {
+		record, err := s.idempotency.Get(ctx, idempotencyOpReverseCharge, idempotencyKey)
+		if err != nil {
+			return nil, NewFlowStateError("idempotency lookup failed", true, err)
+		}
+		if record != nil && record.ReverseChargeResponse != nil {
+			cached := *record.ReverseChargeResponse
+			return &cached, nil
+		}
+	}
+
+	if err := validateBuyOrder(req.BuyOrder); err != nil {
+		return nil, NewValidationError("invalid buy_order", err)
+	}
+	if err := validateCommerceCode(req.CommerceCode); err != nil {
+		return nil, NewValidationError("invalid commerce_code", err)
+	}
+	if err := validateBuyOrder(req.DetailBuyOrder); err != nil {
+		return nil, NewValidationError("invalid detail_buy_order", err)
+	}
+	if req.Amount <= 0 {
+		return nil, NewValidationError("invalid amount", ErrInvalidAmount)
+	}
+
+	rawResp, err := s.client.RefundTransaction(ctx, req.BuyOrder, RefundRequest{
+		CommerceCode:   req.CommerceCode,
+		DetailBuyOrder: req.DetailBuyOrder,
+		Amount:         req.Amount,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FlowReverseChargeResponse{
+		Refund: *rawResp,
+	}
+	if idempotencyKey != "" {
+		if err := s.idempotency.Save(ctx, IdempotencyRecord{
+			Operation:             idempotencyOpReverseCharge,
+			Key:                   idempotencyKey,
+			ReverseChargeResponse: response,
+		}); err != nil {
+			return nil, NewFlowStateError("save idempotency record", true, err)
+		}
+	}
+
+	return response, nil
+}
+
+func (s *FlowService) resolveChargeIdentity(ctx context.Context, tokenOrTbkUser, username string) (string, string, *FlowState, error) {
+	tokenOrTbkUser = strings.TrimSpace(tokenOrTbkUser)
+	if tokenOrTbkUser == "" {
+		return "", "", nil, NewValidationError("token_or_tbk_user is required", ErrInvalidToken)
+	}
+
+	trimmedUsername := strings.TrimSpace(username)
+	state, err := s.store.GetByToken(ctx, tokenOrTbkUser)
+	if err != nil {
+		if !errors.Is(err, ErrStateStoreNotFound) {
+			return "", "", nil, NewFlowStateError("load flow state", true, err)
+		}
+
+		if trimmedUsername == "" {
+			return "", "", nil, NewValidationError("username is required when token_or_tbk_user is a tbk_user value", ErrInvalidUsername)
+		}
+		if err := validateUsername(trimmedUsername); err != nil {
+			return "", "", nil, NewValidationError("invalid username", err)
+		}
+		if err := validateTbkUser(tokenOrTbkUser); err != nil {
+			return "", "", nil, NewValidationError("invalid token_or_tbk_user", err)
+		}
+		return trimmedUsername, tokenOrTbkUser, nil, nil
+	}
+
+	if state.Status != FlowStatusConfirmed || state.Confirmation == nil {
+		return "", "", nil, NewFlowStateError("flow state is not confirmed", false, ErrFlowState)
+	}
+
+	resolvedUsername := strings.TrimSpace(state.Username)
+	if trimmedUsername != "" {
+		if err := validateUsername(trimmedUsername); err != nil {
+			return "", "", nil, NewValidationError("invalid username", err)
+		}
+		if resolvedUsername != "" && trimmedUsername != resolvedUsername {
+			return "", "", nil, NewValidationError("username does not match confirmed flow state", ErrInvalidUsername)
+		}
+		resolvedUsername = trimmedUsername
+	}
+	if resolvedUsername == "" {
+		return "", "", nil, NewFlowStateError("confirmed flow state missing username", false, ErrFlowState)
+	}
+	if err := validateUsername(resolvedUsername); err != nil {
+		return "", "", nil, NewValidationError("invalid username", err)
+	}
+
+	tbkUser := strings.TrimSpace(state.Confirmation.TbkUser)
+	if err := validateTbkUser(tbkUser); err != nil {
+		return "", "", nil, NewFlowStateError("confirmed flow state missing tbk_user", false, ErrFlowState)
+	}
+
+	cloned := cloneFlowState(*state)
+	return resolvedUsername, tbkUser, &cloned, nil
+}
+
+func flowConfirmResponseFromState(state FlowState) *FlowConfirmResponse {
+	cloned := cloneFlowState(state)
+	response := &FlowConfirmResponse{
+		State:          cloned,
+		BusinessID:     strings.TrimSpace(cloned.BusinessID),
+		SubscriptionID: strings.TrimSpace(cloned.SubscriptionID),
+		Context:        cloneStringMap(cloned.Context),
+	}
+	if cloned.Confirmation != nil {
+		response.Confirmation = *cloned.Confirmation
+	}
+	return response
 }
 
 func cloneFlowState(state FlowState) FlowState {
