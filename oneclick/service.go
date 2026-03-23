@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,347 +22,473 @@ const (
 	maxCommerceCodeLength      = 12
 	maxAuthorizationCodeLength = 6
 	maxInstallmentsNumber      = 99
-
-	defaultIntegrationBaseURL = "https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2"
-	defaultProductionBaseURL  = "https://webpay3g.transbank.cl/rswebpaytransaction/api/oneclick/v1.2"
 )
 
-const (
-	// DefaultIntegrationCommerceCode is the public commerce code for Transbank integration testing.
-	DefaultIntegrationCommerceCode = "597055555541"
-	// DefaultIntegrationAPISecret is the public API secret for Transbank integration testing.
-	DefaultIntegrationAPISecret = "579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C"
-)
-
-// Environment identifies the target Oneclick API environment.
-type Environment string
-
-const (
-	// EnvironmentIntegration points to Transbank integration endpoints.
-	EnvironmentIntegration Environment = "integration"
-	// EnvironmentProduction points to Transbank production endpoints.
-	EnvironmentProduction Environment = "production"
-)
-
-// IsValid returns true when the environment value is recognized.
-func (e Environment) IsValid() bool {
-	return e == EnvironmentIntegration || e == EnvironmentProduction
+// Client is the raw Oneclick API client (1:1 with Transbank endpoints).
+type Client struct {
+	cfg      Config
+	http     *http.Client
+	breaker  *circuitBreaker
+	metrics  *ClientMetrics
+	requestN uint64
 }
 
-// OneclickService provides methods to interact with the Transbank Oneclick API.
-type OneclickService struct {
-	commerceCode string
-	apiSecret    string
-	baseURL      string
-	environment  Environment
-	httpClient   *http.Client
+// OneclickService is kept as a backward-compatible alias.
+type OneclickService = Client
+
+// NewClient creates a new raw Oneclick client with defaults + options.
+func NewClient(opts ...Option) (*Client, error) {
+	cfg := DefaultConfig()
+	return NewClientWithConfig(cfg, opts...)
+}
+
+// NewClientWithConfig creates a new raw Oneclick client from config + options.
+func NewClientWithConfig(cfg Config, opts ...Option) (*Client, error) {
+	for _, opt := range opts {
+		if err := opt(&cfg); err != nil {
+			return nil, err
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	return &Client{
+		cfg:     cfg,
+		http:    cfg.HTTPClient,
+		breaker: newCircuitBreaker(cfg.CircuitBreaker, cfg.Clock),
+		metrics: &ClientMetrics{},
+	}, nil
 }
 
 // NewOneclickService creates a Oneclick service preconfigured for integration.
 // It uses Transbank public integration credentials and integration base URL.
 func NewOneclickService() (*OneclickService, error) {
-	return NewOneclickServiceFor(EnvironmentIntegration, "", "", nil)
+	cfg := DefaultConfig()
+	cfg.Environment = EnvironmentIntegration
+	cfg.CommerceCode = ""
+	cfg.APISecret = ""
+	return NewClientWithConfig(cfg)
 }
 
 // NewOneclickServiceFor creates a Oneclick service for the requested environment.
 //
 // Rules:
-// - environment "" is treated as integration.
+// - environment "" is autodetected.
 // - integration + empty credentials uses public integration defaults.
 // - production requires explicit credentials.
 func NewOneclickServiceFor(environment Environment, commerceCode, apiSecret string, httpClient *http.Client) (*OneclickService, error) {
-	resolvedEnvironment, err := resolveEnvironment(environment)
-	if err != nil {
-		return nil, err
+	cfg := DefaultConfig()
+	cfg.Environment = environment
+	cfg.CommerceCode = strings.TrimSpace(commerceCode)
+	cfg.APISecret = strings.TrimSpace(apiSecret)
+	if httpClient != nil {
+		cfg.HTTPClient = httpClient
 	}
-
-	commerceCode = strings.TrimSpace(commerceCode)
-	apiSecret = strings.TrimSpace(apiSecret)
-	if resolvedEnvironment == EnvironmentIntegration && commerceCode == "" && apiSecret == "" {
-		commerceCode = DefaultIntegrationCommerceCode
-		apiSecret = DefaultIntegrationAPISecret
-	}
-
-	return newOneclickServiceWithBaseURL(
-		resolvedEnvironment,
-		commerceCode,
-		apiSecret,
-		baseURLForEnvironment(resolvedEnvironment),
-		httpClient,
-	)
+	return NewClientWithConfig(cfg)
 }
 
 func newOneclickServiceWithBaseURL(environment Environment, commerceCode, apiSecret, baseURL string, httpClient *http.Client) (*OneclickService, error) {
-	if !environment.IsValid() {
-		return nil, ErrInvalidEnvironment
+	cfg := DefaultConfig()
+	cfg.Environment = environment
+	cfg.CommerceCode = strings.TrimSpace(commerceCode)
+	cfg.APISecret = strings.TrimSpace(apiSecret)
+	cfg.BaseURL = strings.TrimSpace(baseURL)
+	if httpClient != nil {
+		cfg.HTTPClient = httpClient
 	}
-	if err := validateCommerceCode(commerceCode); err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(apiSecret) == "" {
-		return nil, ErrInvalidAPISecret
-	}
-	if err := validateBaseURL(baseURL); err != nil {
-		return nil, err
-	}
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
-	}
+	return NewClientWithConfig(cfg)
+}
 
-	return &OneclickService{
-		commerceCode: strings.TrimSpace(commerceCode),
-		apiSecret:    strings.TrimSpace(apiSecret),
-		baseURL:      strings.TrimSuffix(baseURL, "/"),
-		environment:  environment,
-		httpClient:   httpClient,
-	}, nil
+// Config returns a copy of the effective config used by this client.
+func (c *Client) Config() Config {
+	return c.cfg
 }
 
 // CommerceCode returns the configured commerce code.
-func (s *OneclickService) CommerceCode() string {
-	return s.commerceCode
+func (c *Client) CommerceCode() string {
+	return c.cfg.CommerceCode
 }
 
 // IsIntegrationEnvironment returns true if the service appears configured for integration.
-func (s *OneclickService) IsIntegrationEnvironment() bool {
-	return s.environment == EnvironmentIntegration
+func (c *Client) IsIntegrationEnvironment() bool {
+	return c.cfg.Environment == EnvironmentIntegration
 }
 
 // IsProduction returns true if the service appears configured for production.
-func (s *OneclickService) IsProduction() bool {
-	return s.environment == EnvironmentProduction
+func (c *Client) IsProduction() bool {
+	return c.cfg.Environment == EnvironmentProduction
 }
 
-// Start initiates a new inscription and returns token + Webpay redirect URL.
-func (s *OneclickService) Start(ctx context.Context, username, email, responseURL string) (*InscriptionResponse, error) {
-	if err := validateUsername(username); err != nil {
-		return nil, err
+// MetricsSnapshot returns current client metrics.
+func (c *Client) MetricsSnapshot() MetricsSnapshot {
+	return c.metrics.snapshot()
+}
+
+// StartInscription maps to POST /inscriptions.
+func (c *Client) StartInscription(ctx context.Context, req InscriptionRequest) (*InscriptionResponse, error) {
+	if err := validateUsername(req.Username); err != nil {
+		return nil, NewValidationError("invalid username", err)
 	}
-	if err := validateEmail(email); err != nil {
-		return nil, err
+	if err := validateEmail(req.Email); err != nil {
+		return nil, NewValidationError("invalid email", err)
 	}
-	if err := validateResponseURL(responseURL); err != nil {
-		return nil, err
+	if err := validateResponseURL(req.ResponseURL); err != nil {
+		return nil, NewValidationError("invalid response URL", err)
 	}
 
-	req := &InscriptionRequest{
-		Username:    strings.TrimSpace(username),
-		Email:       strings.TrimSpace(email),
-		ResponseURL: strings.TrimSpace(responseURL),
+	normalized := InscriptionRequest{
+		Username:    strings.TrimSpace(req.Username),
+		Email:       strings.TrimSpace(req.Email),
+		ResponseURL: strings.TrimSpace(req.ResponseURL),
 	}
 
 	var resp InscriptionResponse
-	if err := s.doRequest(ctx, http.MethodPost, "/inscriptions", req, &resp); err != nil {
+	if err := c.doRequest(ctx, "start_inscription", http.MethodPost, "/inscriptions", normalized, &resp, 0); err != nil {
 		return nil, err
 	}
 
 	return &resp, nil
 }
 
-// Finish confirms an inscription using the token returned to the commerce callback URL.
-func (s *OneclickService) Finish(ctx context.Context, token string) (*InscriptionConfirmResponse, error) {
+// ConfirmInscription maps to PUT /inscriptions/{token}.
+func (c *Client) ConfirmInscription(ctx context.Context, token string) (*InscriptionConfirmResponse, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return nil, ErrInvalidToken
+		return nil, NewValidationError("invalid token", ErrInvalidToken)
 	}
 
 	endpoint := fmt.Sprintf("/inscriptions/%s", url.PathEscape(token))
 	var resp InscriptionConfirmResponse
 	// Transbank requires an explicit empty JSON body for this endpoint.
-	if err := s.doRequest(ctx, http.MethodPut, endpoint, struct{}{}, &resp); err != nil {
+	if err := c.doRequest(ctx, "confirm_inscription", http.MethodPut, endpoint, struct{}{}, &resp, len(token)); err != nil {
 		return nil, err
 	}
 
 	if resp.ResponseCode != ResponseCodeSuccess {
-		return nil, NewTransbankError(resp.ResponseCode, "inscription confirmation failed", nil)
+		c.metrics.incConfirmationFailure()
+		tbkErr := NewTransbankError(resp.ResponseCode, "inscription confirmation failed", nil)
+		return nil, NewGatewayError("inscription confirmation failed", false, tbkErr)
 	}
 
 	return &resp, nil
 }
 
-// Remove deletes an existing inscription.
-func (s *OneclickService) Remove(ctx context.Context, tbkUser, username string) error {
-	if err := validateTbkUser(tbkUser); err != nil {
-		return err
+// DeleteInscription maps to DELETE /inscriptions.
+func (c *Client) DeleteInscription(ctx context.Context, req DeleteInscriptionRequest) error {
+	if err := validateTbkUser(req.TbkUser); err != nil {
+		return NewValidationError("invalid tbk_user", err)
 	}
-	if err := validateUsername(username); err != nil {
-		return err
-	}
-
-	req := &DeleteInscriptionRequest{
-		TbkUser:  strings.TrimSpace(tbkUser),
-		Username: strings.TrimSpace(username),
+	if err := validateUsername(req.Username); err != nil {
+		return NewValidationError("invalid username", err)
 	}
 
-	return s.doRequestRaw(ctx, http.MethodDelete, "/inscriptions", req)
+	normalized := DeleteInscriptionRequest{
+		TbkUser:  strings.TrimSpace(req.TbkUser),
+		Username: strings.TrimSpace(req.Username),
+	}
+
+	return c.doRequestRaw(ctx, "delete_inscription", http.MethodDelete, "/inscriptions", normalized, 0)
 }
 
-// Authorize authorizes one or many child transactions for an enrolled user.
-func (s *OneclickService) Authorize(ctx context.Context, username, tbkUser, buyOrder string, details []TransactionDetail) (*AuthorizeTransactionResponse, error) {
-	if err := validateUsername(username); err != nil {
-		return nil, err
+// AuthorizeTransaction maps to POST /transactions.
+func (c *Client) AuthorizeTransaction(ctx context.Context, req AuthorizeTransactionRequest) (*AuthorizeTransactionResponse, error) {
+	if err := validateUsername(req.Username); err != nil {
+		return nil, NewValidationError("invalid username", err)
 	}
-	if err := validateTbkUser(tbkUser); err != nil {
-		return nil, err
+	if err := validateTbkUser(req.TbkUser); err != nil {
+		return nil, NewValidationError("invalid tbk_user", err)
 	}
-	if err := validateBuyOrder(buyOrder); err != nil {
-		return nil, err
+	if err := validateBuyOrder(req.BuyOrder); err != nil {
+		return nil, NewValidationError("invalid buy_order", err)
 	}
 
-	normalizedDetails, err := normalizeAndValidateDetails(details)
+	normalizedDetails, err := normalizeAndValidateDetails(req.Details)
 	if err != nil {
-		return nil, err
+		return nil, NewValidationError("invalid transaction details", err)
 	}
 
-	req := &AuthorizeTransactionRequest{
-		Username: strings.TrimSpace(username),
-		TbkUser:  strings.TrimSpace(tbkUser),
-		BuyOrder: strings.TrimSpace(buyOrder),
+	normalized := AuthorizeTransactionRequest{
+		Username: strings.TrimSpace(req.Username),
+		TbkUser:  strings.TrimSpace(req.TbkUser),
+		BuyOrder: strings.TrimSpace(req.BuyOrder),
 		Details:  normalizedDetails,
 	}
 
 	var resp AuthorizeTransactionResponse
-	if err := s.doRequest(ctx, http.MethodPost, "/transactions", req, &resp); err != nil {
+	if err := c.doRequest(ctx, "authorize_transaction", http.MethodPost, "/transactions", normalized, &resp, 0); err != nil {
 		return nil, err
 	}
 
 	return &resp, nil
 }
 
-// Status retrieves the status of a previously authorized transaction.
-func (s *OneclickService) Status(ctx context.Context, buyOrder string) (*AuthorizeTransactionResponse, error) {
+// GetTransactionStatus maps to GET /transactions/{buyOrder}.
+func (c *Client) GetTransactionStatus(ctx context.Context, buyOrder string) (*AuthorizeTransactionResponse, error) {
 	if err := validateBuyOrder(buyOrder); err != nil {
-		return nil, err
+		return nil, NewValidationError("invalid buy_order", err)
 	}
 
 	endpoint := fmt.Sprintf("/transactions/%s", url.PathEscape(strings.TrimSpace(buyOrder)))
 	var resp AuthorizeTransactionResponse
-	if err := s.doRequest(ctx, http.MethodGet, endpoint, nil, &resp); err != nil {
+	if err := c.doRequest(ctx, "transaction_status", http.MethodGet, endpoint, nil, &resp, 0); err != nil {
 		return nil, err
 	}
 
 	return &resp, nil
 }
 
-// Refund reverses or nullifies a previously authorized transaction.
-func (s *OneclickService) Refund(ctx context.Context, buyOrder, commerceCode, detailBuyOrder string, amount int) (*RefundResponse, error) {
+// RefundTransaction maps to POST /transactions/{buyOrder}/refunds.
+func (c *Client) RefundTransaction(ctx context.Context, buyOrder string, req RefundRequest) (*RefundResponse, error) {
 	if err := validateBuyOrder(buyOrder); err != nil {
-		return nil, err
+		return nil, NewValidationError("invalid buy_order", err)
 	}
-	if err := validateCommerceCode(commerceCode); err != nil {
-		return nil, err
+	if err := validateCommerceCode(req.CommerceCode); err != nil {
+		return nil, NewValidationError("invalid commerce_code", err)
 	}
-	if err := validateBuyOrder(detailBuyOrder); err != nil {
-		return nil, err
+	if err := validateBuyOrder(req.DetailBuyOrder); err != nil {
+		return nil, NewValidationError("invalid detail_buy_order", err)
 	}
-	if amount <= 0 {
-		return nil, ErrInvalidAmount
+	if req.Amount <= 0 {
+		return nil, NewValidationError("invalid amount", ErrInvalidAmount)
 	}
 
-	req := &RefundRequest{
-		CommerceCode:   strings.TrimSpace(commerceCode),
-		DetailBuyOrder: strings.TrimSpace(detailBuyOrder),
-		Amount:         amount,
+	normalized := RefundRequest{
+		CommerceCode:   strings.TrimSpace(req.CommerceCode),
+		DetailBuyOrder: strings.TrimSpace(req.DetailBuyOrder),
+		Amount:         req.Amount,
 	}
 
 	endpoint := fmt.Sprintf("/transactions/%s/refunds", url.PathEscape(strings.TrimSpace(buyOrder)))
 	var resp RefundResponse
-	if err := s.doRequest(ctx, http.MethodPost, endpoint, req, &resp); err != nil {
+	if err := c.doRequest(ctx, "refund_transaction", http.MethodPost, endpoint, normalized, &resp, 0); err != nil {
 		return nil, err
 	}
 
 	return &resp, nil
 }
 
-// Capture performs a deferred capture for a previously authorized child transaction.
-func (s *OneclickService) Capture(ctx context.Context, commerceCode, buyOrder, authorizationCode string, captureAmount int) (*CaptureResponse, error) {
-	if err := validateCommerceCode(commerceCode); err != nil {
-		return nil, err
+// CaptureTransaction maps to PUT /transactions/capture.
+func (c *Client) CaptureTransaction(ctx context.Context, req CaptureRequest) (*CaptureResponse, error) {
+	if err := validateCommerceCode(req.CommerceCode); err != nil {
+		return nil, NewValidationError("invalid commerce_code", err)
 	}
-	if err := validateBuyOrder(buyOrder); err != nil {
-		return nil, err
+	if err := validateBuyOrder(req.BuyOrder); err != nil {
+		return nil, NewValidationError("invalid buy_order", err)
 	}
-	if err := validateAuthorizationCode(authorizationCode); err != nil {
-		return nil, err
+	if err := validateAuthorizationCode(req.AuthorizationCode); err != nil {
+		return nil, NewValidationError("invalid authorization_code", err)
 	}
-	if captureAmount <= 0 {
-		return nil, ErrInvalidCaptureAmount
+	if req.CaptureAmount <= 0 {
+		return nil, NewValidationError("invalid capture_amount", ErrInvalidCaptureAmount)
 	}
 
-	req := &CaptureRequest{
-		CommerceCode:      strings.TrimSpace(commerceCode),
-		BuyOrder:          strings.TrimSpace(buyOrder),
-		CaptureAmount:     captureAmount,
-		AuthorizationCode: strings.TrimSpace(authorizationCode),
+	normalized := CaptureRequest{
+		CommerceCode:      strings.TrimSpace(req.CommerceCode),
+		BuyOrder:          strings.TrimSpace(req.BuyOrder),
+		CaptureAmount:     req.CaptureAmount,
+		AuthorizationCode: strings.TrimSpace(req.AuthorizationCode),
 	}
 
 	var resp CaptureResponse
-	if err := s.doRequest(ctx, http.MethodPut, "/transactions/capture", req, &resp); err != nil {
+	if err := c.doRequest(ctx, "capture_transaction", http.MethodPut, "/transactions/capture", normalized, &resp, 0); err != nil {
 		return nil, err
 	}
 
 	return &resp, nil
 }
 
+// Backward-compatible wrappers.
+
+// Start initiates a new inscription and returns token + Webpay redirect URL.
+func (c *Client) Start(ctx context.Context, username, email, responseURL string) (*InscriptionResponse, error) {
+	return c.StartInscription(ctx, InscriptionRequest{
+		Username:    username,
+		Email:       email,
+		ResponseURL: responseURL,
+	})
+}
+
+// Finish confirms an inscription using the token returned to the commerce callback URL.
+func (c *Client) Finish(ctx context.Context, token string) (*InscriptionConfirmResponse, error) {
+	return c.ConfirmInscription(ctx, token)
+}
+
+// Remove deletes an existing inscription.
+func (c *Client) Remove(ctx context.Context, tbkUser, username string) error {
+	return c.DeleteInscription(ctx, DeleteInscriptionRequest{
+		TbkUser:  tbkUser,
+		Username: username,
+	})
+}
+
+// Authorize authorizes one or many child transactions for an enrolled user.
+func (c *Client) Authorize(ctx context.Context, username, tbkUser, buyOrder string, details []TransactionDetail) (*AuthorizeTransactionResponse, error) {
+	return c.AuthorizeTransaction(ctx, AuthorizeTransactionRequest{
+		Username: username,
+		TbkUser:  tbkUser,
+		BuyOrder: buyOrder,
+		Details:  details,
+	})
+}
+
+// Status retrieves the status of a previously authorized transaction.
+func (c *Client) Status(ctx context.Context, buyOrder string) (*AuthorizeTransactionResponse, error) {
+	return c.GetTransactionStatus(ctx, buyOrder)
+}
+
+// Refund reverses or nullifies a previously authorized transaction.
+func (c *Client) Refund(ctx context.Context, buyOrder, commerceCode, detailBuyOrder string, amount int) (*RefundResponse, error) {
+	return c.RefundTransaction(ctx, buyOrder, RefundRequest{
+		CommerceCode:   commerceCode,
+		DetailBuyOrder: detailBuyOrder,
+		Amount:         amount,
+	})
+}
+
+// Capture performs a deferred capture for a previously authorized child transaction.
+func (c *Client) Capture(ctx context.Context, commerceCode, buyOrder, authorizationCode string, captureAmount int) (*CaptureResponse, error) {
+	return c.CaptureTransaction(ctx, CaptureRequest{
+		CommerceCode:      commerceCode,
+		BuyOrder:          buyOrder,
+		CaptureAmount:     captureAmount,
+		AuthorizationCode: authorizationCode,
+	})
+}
+
 // doRequest makes an HTTP request to the Transbank API and decodes the JSON response.
-func (s *OneclickService) doRequest(ctx context.Context, method, path string, body interface{}, respTarget interface{}) error {
-	req, err := s.buildRequest(ctx, method, path, body)
-	if err != nil {
+func (c *Client) doRequest(ctx context.Context, operation, method, path string, body interface{}, respTarget interface{}, tokenLength int) error {
+	if !c.breaker.allow() {
+		err := NewTransportError("circuit breaker is open", true, nil)
+		c.callOnError(ctx, c.nextRequestID(), operation, method, path, 0, 0, 0, true, 0, err)
 		return err
 	}
 
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
+	var lastErr error
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read response body: %w", err)
-	}
+	for attempt := 1; attempt <= c.cfg.RetryPolicy.MaxAttempts; attempt++ {
+		startedAt := c.cfg.Clock.Now()
+		requestID := c.nextRequestID()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return s.parseErrorResponse(resp.StatusCode, respBody)
-	}
+		c.callBeforeRequest(ctx, RequestEvent{
+			RequestID:   requestID,
+			Operation:   operation,
+			Method:      method,
+			Path:        path,
+			Attempt:     attempt,
+			TokenLength: tokenLength,
+			StartedAt:   startedAt,
+		})
 
-	if respTarget != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, respTarget); err != nil {
-			return fmt.Errorf("unmarshal response: %w", err)
+		req, err := c.buildRequest(ctx, method, path, body)
+		if err != nil {
+			wrapped := NewValidationError("build request", err)
+			c.callOnError(ctx, requestID, operation, method, path, attempt, 0, 0, false, c.cfg.Clock.Now().Sub(startedAt), wrapped)
+			return wrapped
 		}
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			latency := c.cfg.Clock.Now().Sub(startedAt)
+			retryable := isTransportRetryable(err)
+			wrapped := NewTransportError("do request", retryable, err)
+			c.metrics.record(latency, true, false)
+			c.breaker.markFailure()
+			c.callOnError(ctx, requestID, operation, method, path, attempt, 0, 0, retryable, latency, wrapped)
+
+			if retryable && attempt < c.cfg.RetryPolicy.MaxAttempts {
+				if waitErr := c.waitBeforeRetry(ctx, attempt); waitErr != nil {
+					return NewTransportError("retry canceled", false, waitErr)
+				}
+				lastErr = wrapped
+				continue
+			}
+
+			return wrapped
+		}
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			latency := c.cfg.Clock.Now().Sub(startedAt)
+			wrapped := NewTransportError("read response body", true, readErr)
+			c.metrics.record(latency, true, false)
+			c.breaker.markFailure()
+			c.callOnError(ctx, requestID, operation, method, path, attempt, resp.StatusCode, 0, true, latency, wrapped)
+
+			if attempt < c.cfg.RetryPolicy.MaxAttempts {
+				if waitErr := c.waitBeforeRetry(ctx, attempt); waitErr != nil {
+					return NewTransportError("retry canceled", false, waitErr)
+				}
+				lastErr = wrapped
+				continue
+			}
+
+			return wrapped
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			latency := c.cfg.Clock.Now().Sub(startedAt)
+			parsedErr, responseCode := c.parseErrorResponse(resp.StatusCode, respBody)
+			retryable := c.isStatusRetryable(resp.StatusCode)
+			wrapped := NewGatewayError("transbank API error", retryable, parsedErr)
+			c.metrics.record(latency, true, operation == "confirm_inscription")
+			c.breaker.markFailure()
+			c.callOnError(ctx, requestID, operation, method, path, attempt, resp.StatusCode, responseCode, retryable, latency, wrapped)
+
+			if retryable && attempt < c.cfg.RetryPolicy.MaxAttempts {
+				if waitErr := c.waitBeforeRetry(ctx, attempt); waitErr != nil {
+					return NewTransportError("retry canceled", false, waitErr)
+				}
+				lastErr = wrapped
+				continue
+			}
+
+			return wrapped
+		}
+
+		if respTarget != nil && len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, respTarget); err != nil {
+				latency := c.cfg.Clock.Now().Sub(startedAt)
+				wrapped := NewGatewayError("unmarshal response", false, err)
+				c.metrics.record(latency, true, operation == "confirm_inscription")
+				c.breaker.markFailure()
+				c.callOnError(ctx, requestID, operation, method, path, attempt, resp.StatusCode, 0, false, latency, wrapped)
+				return wrapped
+			}
+		}
+
+		latency := c.cfg.Clock.Now().Sub(startedAt)
+		responseCode := extractResponseCode(respTarget)
+		c.metrics.record(latency, false, false)
+		c.breaker.markSuccess()
+		c.callAfterRequest(ctx, ResponseEvent{
+			RequestID:    requestID,
+			Operation:    operation,
+			Method:       method,
+			Path:         path,
+			Attempt:      attempt,
+			StatusCode:   resp.StatusCode,
+			Latency:      latency,
+			ResponseCode: responseCode,
+		})
+		return nil
 	}
 
-	return nil
+	if lastErr != nil {
+		return lastErr
+	}
+	return NewTransportError("request failed after retries", false, nil)
 }
 
 // doRequestRaw makes an HTTP request without expecting a JSON response body.
-func (s *OneclickService) doRequestRaw(ctx context.Context, method, path string, body interface{}) error {
-	req, err := s.buildRequest(ctx, method, path, body)
-	if err != nil {
-		return err
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read response body: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return s.parseErrorResponse(resp.StatusCode, respBody)
-	}
-
-	return nil
+func (c *Client) doRequestRaw(ctx context.Context, operation, method, path string, body interface{}, tokenLength int) error {
+	return c.doRequest(ctx, operation, method, path, body, nil, tokenLength)
 }
 
 // buildRequest constructs an HTTP request with proper headers and authentication.
-func (s *OneclickService) buildRequest(ctx context.Context, method, path string, body interface{}) (*http.Request, error) {
-	requestURL := s.baseURL + path
+func (c *Client) buildRequest(ctx context.Context, method, path string, body interface{}) (*http.Request, error) {
+	requestURL := c.cfg.BaseURL + path
 	var reqBody io.Reader
 
 	if body != nil {
@@ -377,20 +504,15 @@ func (s *OneclickService) buildRequest(ctx context.Context, method, path string,
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("Tbk-Api-Key-Id", s.commerceCode)
-	req.Header.Set("Tbk-Api-Key-Secret", s.apiKeySecret())
+	req.Header.Set("Tbk-Api-Key-Id", c.cfg.CommerceCode)
+	req.Header.Set("Tbk-Api-Key-Secret", c.cfg.APISecret)
 	req.Header.Set("Content-Type", "application/json")
 
 	return req, nil
 }
 
-func (s *OneclickService) apiKeySecret() string {
-	// For Oneclick v1.2, this header is the configured API secret.
-	return s.apiSecret
-}
-
 // parseErrorResponse parses an error response from Transbank.
-func (s *OneclickService) parseErrorResponse(statusCode int, respBody []byte) error {
+func (c *Client) parseErrorResponse(statusCode int, respBody []byte) (error, int) {
 	var errorResp struct {
 		ResponseCode *int   `json:"response_code"`
 		Error        string `json:"error"`
@@ -404,18 +526,104 @@ func (s *OneclickService) parseErrorResponse(statusCode int, respBody []byte) er
 			if msg == "" {
 				msg = http.StatusText(statusCode)
 			}
-			return NewTransbankErrorWithDetails(*errorResp.ResponseCode, msg, string(respBody), fmt.Errorf("http %d", statusCode))
+			return NewTransbankErrorWithDetails(*errorResp.ResponseCode, msg, string(respBody), fmt.Errorf("http %d", statusCode)), *errorResp.ResponseCode
 		}
 		if msg != "" {
-			return NewTransbankErrorWithDetails(statusCode, msg, string(respBody), fmt.Errorf("http %d", statusCode))
+			return NewTransbankErrorWithDetails(statusCode, msg, string(respBody), fmt.Errorf("http %d", statusCode)), statusCode
 		}
 	}
 
 	if len(respBody) > 0 {
-		return fmt.Errorf("transbank API error (HTTP %d): %s", statusCode, string(respBody))
+		return fmt.Errorf("transbank API error (HTTP %d): %s", statusCode, string(respBody)), statusCode
 	}
 
-	return fmt.Errorf("transbank API error HTTP %d", statusCode)
+	return fmt.Errorf("transbank API error HTTP %d", statusCode), statusCode
+}
+
+func (c *Client) waitBeforeRetry(ctx context.Context, attempt int) error {
+	backoff := c.cfg.RetryPolicy.InitialBackoff
+	for i := 1; i < attempt; i++ {
+		if backoff >= c.cfg.RetryPolicy.MaxBackoff {
+			break
+		}
+		backoff = backoff * 2
+		if backoff > c.cfg.RetryPolicy.MaxBackoff {
+			backoff = c.cfg.RetryPolicy.MaxBackoff
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.cfg.Clock.After(backoff):
+		return nil
+	}
+}
+
+func (c *Client) isStatusRetryable(statusCode int) bool {
+	_, ok := c.cfg.RetryPolicy.RetryOnStatus[statusCode]
+	return ok
+}
+
+func (c *Client) nextRequestID() string {
+	n := atomic.AddUint64(&c.requestN, 1)
+	return fmt.Sprintf("oc_%d_%d", c.cfg.Clock.Now().UnixNano(), n)
+}
+
+func (c *Client) callBeforeRequest(ctx context.Context, event RequestEvent) {
+	if c.cfg.Hooks.BeforeRequest != nil {
+		c.cfg.Hooks.BeforeRequest(ctx, event)
+	}
+}
+
+func (c *Client) callAfterRequest(ctx context.Context, event ResponseEvent) {
+	if c.cfg.Hooks.AfterRequest != nil {
+		c.cfg.Hooks.AfterRequest(ctx, event)
+	}
+}
+
+func (c *Client) callOnError(ctx context.Context, requestID, operation, method, path string, attempt, statusCode, responseCode int, retryable bool, latency time.Duration, err error) {
+	if c.cfg.Hooks.OnError != nil {
+		c.cfg.Hooks.OnError(ctx, ErrorEvent{
+			RequestID:    requestID,
+			Operation:    operation,
+			Method:       method,
+			Path:         path,
+			Attempt:      attempt,
+			StatusCode:   statusCode,
+			ResponseCode: responseCode,
+			Retryable:    retryable,
+			Latency:      latency,
+			Err:          err,
+		})
+	}
+}
+
+func isTransportRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == context.Canceled || err == context.DeadlineExceeded {
+		return false
+	}
+	errText := strings.ToLower(err.Error())
+	if strings.Contains(errText, "timeout") || strings.Contains(errText, "temporary") || strings.Contains(errText, "connection reset") {
+		return true
+	}
+	return true
+}
+
+func extractResponseCode(respTarget interface{}) int {
+	switch v := respTarget.(type) {
+	case *InscriptionConfirmResponse:
+		return v.ResponseCode
+	case *CaptureResponse:
+		return v.ResponseCode
+	case *RefundResponse:
+		return v.ResponseCode
+	default:
+		return 0
+	}
 }
 
 func normalizeAndValidateDetails(details []TransactionDetail) ([]TransactionDetail, error) {
@@ -489,23 +697,6 @@ func validateResponseURL(responseURL string) error {
 	}
 
 	return nil
-}
-
-func resolveEnvironment(environment Environment) (Environment, error) {
-	if environment == "" {
-		return EnvironmentIntegration, nil
-	}
-	if !environment.IsValid() {
-		return "", ErrInvalidEnvironment
-	}
-	return environment, nil
-}
-
-func baseURLForEnvironment(environment Environment) string {
-	if environment == EnvironmentProduction {
-		return defaultProductionBaseURL
-	}
-	return defaultIntegrationBaseURL
 }
 
 func validateBaseURL(baseURL string) error {

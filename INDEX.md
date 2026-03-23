@@ -1,34 +1,42 @@
 # Índice de Documentación
 
-Este repositorio mantiene su documentación principal en los siguientes archivos.
-
 ## Documentación principal
 
 - `README.md`
   - Guía general del SDK Oneclick Mall v1.2.
-  - API pública, ejemplos de uso y recomendaciones de seguridad.
-  - Inicialización simplificada:
-    - `NewOneclickService()` para integración
-    - `NewOneclickServiceFor(...)` para producción/avanzado
+  - Arquitectura v1.1.0: `Client` (raw) + `FlowService` (alto nivel).
+  - Configuración, opciones, errores tipados, observabilidad y ejemplos.
 
 - `INTEGRATION_TESTS.md`
-  - Guía actualizada de pruebas de integración reales.
-  - Comandos de ejecución (`TRANSBANK_RUN_INTEGRATION_TESTS=1 ...`).
+  - Guía de pruebas de integración reales.
   - Variables de entorno y fixtures opcionales.
 
 ## Código fuente relevante
 
 - `oneclick/service.go`
-  - Implementación del cliente y operaciones del API.
+  - Cliente raw `Client` y wrappers legacy (`OneclickService`).
+  - Resiliencia: retries + circuit breaker + hooks + métricas.
+
+- `oneclick/config.go`
+  - `Config`, defaults, autodetección de ambiente y options pattern.
+
+- `oneclick/flow.go`
+  - `FlowService`, `BuildReturnURL`, redirect instruction e idempotencia.
+
+- `oneclick/state_store.go`
+  - `StateStore` + implementaciones in-memory/Postgres/Redis.
+
+- `oneclick/errors.go`
+  - `SDKError` tipado + `TransbankError`.
 
 - `oneclick/types.go`
   - Tipos de request/response.
 
-- `oneclick/errors.go`
-  - Errores tipados del SDK.
-
 - `oneclick/service_test.go`
-  - Tests unitarios de contrato y validaciones.
+  - Tests unitarios del cliente raw.
+
+- `oneclick/flow_test.go`
+  - Tests de flujo alto nivel, idempotencia y hooks.
 
 - `oneclick/integration_test.go`
   - Tests reales contra ambiente de integración.

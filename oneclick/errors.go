@@ -36,7 +36,149 @@ func (e *TransbankError) IsGenericError() bool {
 	return e.Code == -1
 }
 
-// Common error constructors
+// SDKErrorCode identifies high-level SDK failures.
+type SDKErrorCode string
+
+const (
+	SDKErrorCodeValidation    SDKErrorCode = "validation"
+	SDKErrorCodeTransport     SDKErrorCode = "transport"
+	SDKErrorCodeGateway       SDKErrorCode = "gateway"
+	SDKErrorCodeTokenNotFound SDKErrorCode = "token_not_found"
+	SDKErrorCodeFlowState     SDKErrorCode = "flow_state"
+)
+
+// SDKError adds a stable code plus retry and user-safe metadata.
+type SDKError struct {
+	code            SDKErrorCode
+	message         string
+	retryable       bool
+	userSafeMessage string
+	err             error
+}
+
+func (e *SDKError) Error() string {
+	if e.message != "" {
+		if e.err != nil {
+			return fmt.Sprintf("%s: %v", e.message, e.err)
+		}
+		return e.message
+	}
+	if e.err != nil {
+		return e.err.Error()
+	}
+	return string(e.code)
+}
+
+func (e *SDKError) Unwrap() error {
+	return e.err
+}
+
+// Is allows errors.Is(err, ErrValidation) style checks by error code.
+func (e *SDKError) Is(target error) bool {
+	t, ok := target.(*SDKError)
+	if !ok {
+		return false
+	}
+	return e.code == t.code
+}
+
+// Code returns the stable, machine-readable code.
+func (e *SDKError) Code() string {
+	return string(e.code)
+}
+
+// Retryable returns true if callers can safely retry the operation.
+func (e *SDKError) Retryable() bool {
+	return e.retryable
+}
+
+// UserSafeMessage returns a sanitized, end-user-safe message.
+func (e *SDKError) UserSafeMessage() string {
+	if e.userSafeMessage != "" {
+		return e.userSafeMessage
+	}
+	return "No pudimos completar la operación. Intenta nuevamente."
+}
+
+func newSDKError(code SDKErrorCode, message string, retryable bool, userSafe string, err error) *SDKError {
+	return &SDKError{
+		code:            code,
+		message:         message,
+		retryable:       retryable,
+		userSafeMessage: userSafe,
+		err:             err,
+	}
+}
+
+// Canonical typed SDK errors for errors.Is checks.
+var (
+	ErrValidation    = &SDKError{code: SDKErrorCodeValidation}
+	ErrTransport     = &SDKError{code: SDKErrorCodeTransport}
+	ErrGateway       = &SDKError{code: SDKErrorCodeGateway}
+	ErrTokenNotFound = &SDKError{code: SDKErrorCodeTokenNotFound}
+	ErrFlowState     = &SDKError{code: SDKErrorCodeFlowState}
+)
+
+// NewValidationError wraps validation failures.
+func NewValidationError(message string, err error) *SDKError {
+	return newSDKError(
+		SDKErrorCodeValidation,
+		message,
+		false,
+		"Revisa los datos ingresados e intenta nuevamente.",
+		err,
+	)
+}
+
+// NewTransportError wraps transport-level failures.
+func NewTransportError(message string, retryable bool, err error) *SDKError {
+	return newSDKError(
+		SDKErrorCodeTransport,
+		message,
+		retryable,
+		"Tenemos problemas de conexión. Intenta nuevamente en unos minutos.",
+		err,
+	)
+}
+
+// NewGatewayError wraps gateway-level failures from Transbank.
+func NewGatewayError(message string, retryable bool, err error) *SDKError {
+	return newSDKError(
+		SDKErrorCodeGateway,
+		message,
+		retryable,
+		"No fue posible procesar el pago en este momento.",
+		err,
+	)
+}
+
+// NewTokenNotFoundError indicates that flow state for the token does not exist.
+func NewTokenNotFoundError(token string, err error) *SDKError {
+	msg := "token not found"
+	if token != "" {
+		msg = fmt.Sprintf("token not found: %s", token)
+	}
+	return newSDKError(
+		SDKErrorCodeTokenNotFound,
+		msg,
+		false,
+		"No encontramos el proceso de inscripción asociado al token recibido.",
+		err,
+	)
+}
+
+// NewFlowStateError wraps state persistence or consistency errors.
+func NewFlowStateError(message string, retryable bool, err error) *SDKError {
+	return newSDKError(
+		SDKErrorCodeFlowState,
+		message,
+		retryable,
+		"No pudimos actualizar el estado del proceso. Intenta nuevamente.",
+		err,
+	)
+}
+
+// Common low-level validation errors.
 var (
 	ErrInvalidCommerceCode  = errors.New("invalid commerce code")
 	ErrInvalidAPISecret     = errors.New("invalid API secret")
