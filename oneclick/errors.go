@@ -97,7 +97,7 @@ func (e *SDKError) UserSafeMessage() string {
 	if e.userSafeMessage != "" {
 		return e.userSafeMessage
 	}
-	return "No pudimos completar la operación. Intenta nuevamente."
+	return defaultSafeErrorMessage
 }
 
 func newSDKError(code SDKErrorCode, message string, retryable bool, userSafe string, err error) *SDKError {
@@ -217,4 +217,58 @@ func NewTransbankErrorWithDetails(code int, message, details string, err error) 
 		Details: details,
 		Err:     err,
 	}
+}
+
+const defaultSafeErrorMessage = "No pudimos completar la operación. Intenta nuevamente."
+
+// ErrorClassification is a stable, integrator-friendly error summary.
+type ErrorClassification struct {
+	Code            string
+	Retryable       bool
+	UserSafeMessage string
+	Cause           error
+}
+
+// ClassifyError returns a stable classification for public SDK error handling.
+func ClassifyError(err error) ErrorClassification {
+	classification := ErrorClassification{
+		Code:            "unknown",
+		Retryable:       false,
+		UserSafeMessage: defaultSafeErrorMessage,
+		Cause:           err,
+	}
+	if err == nil {
+		classification.Cause = nil
+		return classification
+	}
+
+	var sdkErr *SDKError
+	if errors.As(err, &sdkErr) {
+		classification.Code = sdkErr.Code()
+		classification.Retryable = sdkErr.Retryable()
+		classification.UserSafeMessage = sdkErr.UserSafeMessage()
+		classification.Cause = sdkErr
+		return classification
+	}
+
+	switch {
+	case errors.Is(err, ErrValidation):
+		classification.Code = string(SDKErrorCodeValidation)
+	case errors.Is(err, ErrTransport):
+		classification.Code = string(SDKErrorCodeTransport)
+	case errors.Is(err, ErrGateway):
+		classification.Code = string(SDKErrorCodeGateway)
+	case errors.Is(err, ErrTokenNotFound):
+		classification.Code = string(SDKErrorCodeTokenNotFound)
+	case errors.Is(err, ErrFlowState):
+		classification.Code = string(SDKErrorCodeFlowState)
+	default:
+		var tbkErr *TransbankError
+		if errors.As(err, &tbkErr) {
+			classification.Code = string(SDKErrorCodeGateway)
+			classification.Cause = tbkErr
+		}
+	}
+
+	return classification
 }
