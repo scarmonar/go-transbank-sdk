@@ -8,11 +8,20 @@ SDK en Go para **Transbank Oneclick Mall v1.2** con dos niveles de API:
 Fuente oficial del contrato API:
 - https://www.transbankdevelopers.cl/referencia/oneclick
 
+## Novedades v1.2.0
+
+- `FlowConfirmResponse` ahora expone también `BusinessID`, `SubscriptionID` y `Context`.
+- Nuevo helper público `ClassifyError(err)` para clasificación estable de errores.
+- Nuevo flujo alto nivel:
+  - `FlowService.AuthorizeCharge`
+  - `FlowService.ReverseCharge`
+- Correlación de hooks reforzada con `request_id` estable por operación (incluyendo retries).
+
 ## Novedades v1.1.0
 
 - Arquitectura en dos capas: `Client` + `FlowService`.
 - `Config` centralizado con defaults sanos y `Validate()` fail-fast.
-- Options pattern: `WithHTTPClient`, `WithLogger`, `WithRetryPolicy`, `WithClock`, `WithBaseURL`.
+- Options pattern: `WithHTTPClient`, `WithLogger`, `WithRetryPolicy`, `WithClock`.
 - Resiliencia integrada: timeout, retries y circuit breaker.
 - Errores tipados SDK: `ErrValidation`, `ErrTransport`, `ErrGateway`, `ErrTokenNotFound`, `ErrFlowState`.
 - Observabilidad: hooks `BeforeRequest`, `AfterRequest`, `OnError` + métricas internas.
@@ -82,7 +91,6 @@ cfg.APISecret = "TU_SECRET"
 
 client, err := oneclick.NewClientWithConfig(
 	cfg,
-	oneclick.WithBaseURL("https://webpay3g.transbank.cl/rswebpaytransaction/api/oneclick/v1.2"),
 )
 if err != nil {
 	panic(err)
@@ -93,7 +101,10 @@ _ = client
 Ambiente autodetectado:
 - Si usas credenciales públicas de integración o vacías en integración, usa `integration`.
 - Si pasas credenciales custom sin ambiente explícito, asume `production`.
-- Si `BaseURL` apunta a `webpay3gint`, detecta `integration`.
+
+`baseURL` del API Oneclick es interno del SDK y se fija automáticamente según `Environment`:
+- `integration` -> `https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2`
+- `production` -> `https://webpay3g.transbank.cl/rswebpaytransaction/api/oneclick/v1.2`
 
 ## API Raw (`oneclick.Client`)
 
@@ -114,7 +125,7 @@ Wrappers legacy (compat):
 - construcción segura de `response_url`
 - instrucción de redirect a Webpay (`POST + TBK_TOKEN`)
 - estado de flujo por token
-- idempotencia opcional en `Start` y `Confirm`
+- idempotencia opcional en `Start`, `Confirm`, `AuthorizeCharge` y `ReverseCharge`
 
 ```go
 client, _ := oneclick.NewClient()
@@ -150,6 +161,42 @@ if err != nil {
 
 fmt.Println(confirmResp.State.Status)        // confirmed
 fmt.Println(confirmResp.Confirmation.TbkUser)
+fmt.Println(confirmResp.BusinessID)          // biz-1
+fmt.Println(confirmResp.SubscriptionID)      // sub-1
+fmt.Println(confirmResp.Context["tenant_id"]) // tenant-1
+```
+
+### Charge/Reverse de alto nivel
+
+```go
+chargeResp, err := flow.AuthorizeCharge(context.Background(), oneclick.FlowAuthorizeChargeRequest{
+	TokenOrTbkUser: startResp.Token, // también puede ser tbk_user directo
+	BuyOrder:       "mall-order-1",
+	Details: []oneclick.TransactionDetail{
+		{
+			CommerceCode: "597055555542",
+			BuyOrder:     "child-order-1",
+			Amount:       50000,
+		},
+	},
+	IdempotencyKey: "auth-mall-order-1-v1",
+})
+if err != nil {
+	panic(err)
+}
+fmt.Println(chargeResp.BuyOrder, chargeResp.TransactionDate)
+
+reverseResp, err := flow.ReverseCharge(context.Background(), oneclick.FlowReverseChargeRequest{
+	BuyOrder:       "mall-order-1",
+	CommerceCode:   "597055555542",
+	DetailBuyOrder: "child-order-1",
+	Amount:         50000,
+	IdempotencyKey: "reverse-mall-order-1-v1",
+})
+if err != nil {
+	panic(err)
+}
+fmt.Println(reverseResp.Refund.Type)
 ```
 
 ## Return URL Builder
@@ -213,6 +260,15 @@ if err != nil {
 }
 ```
 
+Clasificación estable para integradores:
+
+```go
+classification := oneclick.ClassifyError(err)
+fmt.Println(classification.Code)            // validation | transport | gateway | token_not_found | flow_state | unknown
+fmt.Println(classification.Retryable)       // true/false
+fmt.Println(classification.UserSafeMessage) // mensaje listo para UI
+```
+
 ## Observabilidad y Métricas
 
 Hooks configurables (`WithHooks`):
@@ -224,6 +280,16 @@ Campos estándar disponibles en eventos:
 - `request_id`
 - `token_length`
 - `response_code`
+
+Operaciones observables en hooks:
+- `start_inscription`
+- `confirm_inscription`
+- `authorize_transaction`
+- `refund_transaction`
+- `flow_authorize_charge`
+- `flow_reverse_charge`
+
+`request_id` se mantiene estable por operación y es reutilizado entre retries de esa misma operación.
 
 Métricas internas:
 - latencia promedio
@@ -246,6 +312,11 @@ Suite de integración real:
 ```bash
 TRANSBANK_RUN_INTEGRATION_TESTS=1 go test ./oneclick -run TestIntegrationOneclick -v -count=1
 ```
+
+Documentación de pruebas:
+- `INTEGRATION_TESTS.md`
+- `INTEGRATION_TESTS_QUICK_REF.md`
+- `INTEGRATION_TESTS_COMPLETE.md`
 
 ## Seguridad
 
