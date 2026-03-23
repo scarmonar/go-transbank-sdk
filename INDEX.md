@@ -4,12 +4,19 @@
 
 - `README.md`
   - Guía general del SDK Oneclick Mall v1.2.
-  - Arquitectura v1.1.0: `Client` (raw) + `FlowService` (alto nivel).
+  - Arquitectura v1.2.0: `Client` (raw) + `FlowService` (alto nivel).
+  - Nuevos flujos de cargo/reversa de alto nivel y clasificación estable de errores.
   - Configuración, opciones, errores tipados, observabilidad y ejemplos.
 
 - `INTEGRATION_TESTS.md`
   - Guía de pruebas de integración reales.
   - Variables de entorno y fixtures opcionales.
+
+- `INTEGRATION_TESTS_QUICK_REF.md`
+  - Cheatsheet operativo de comandos y variables para ejecución rápida.
+
+- `INTEGRATION_TESTS_COMPLETE.md`
+  - Guía extendida de operación, troubleshooting y checklist para CI/CD.
 
 ## Código fuente relevante
 
@@ -22,12 +29,15 @@
 
 - `oneclick/flow.go`
   - `FlowService`, `BuildReturnURL`, redirect instruction e idempotencia.
+  - `FlowConfirmResponse` con contexto expandido.
+  - `AuthorizeCharge` / `ReverseCharge`.
 
 - `oneclick/state_store.go`
   - `StateStore` + implementaciones in-memory/Postgres/Redis.
 
 - `oneclick/errors.go`
   - `SDKError` tipado + `TransbankError`.
+  - Helper `ClassifyError(err)`.
 
 - `oneclick/types.go`
   - Tipos de request/response.

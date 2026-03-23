@@ -3,34 +3,38 @@
 Esta guía describe la suite de pruebas reales contra el ambiente de integración de Transbank para Oneclick Mall v1.2.
 
 Fuente oficial de contrato:
-
 - https://www.transbankdevelopers.cl/referencia/oneclick
 
-## Estado actual de la suite
+## Estado actual
 
 Archivo de tests:
-
 - `oneclick/integration_test.go`
 
 Cobertura actual:
-
 - 11 tests de integración real
 - 7 operaciones del API cubiertas (`Start`, `Finish`, `Remove`, `Authorize`, `Status`, `Refund`, `Capture`)
 - smoke tests no destructivos + escenarios mutantes con fixtures
+
+Notas de versión SDK:
+- Desde `v1.1.0`, el SDK expone `Client` (raw) y `FlowService` (alto nivel).
+- Desde `v1.2.0`, `FlowService` agrega `AuthorizeCharge`/`ReverseCharge` y `FlowConfirmResponse` con contexto expandido.
+- Desde `v1.2.0`, existe `ClassifyError(err)` para clasificación estable de errores en integradores.
+- La suite de integración real valida el contrato Transbank usando el cliente raw (vía API compatible `OneclickService`).
+- La capa `FlowService` se valida principalmente con unit tests (`oneclick/flow_test.go`).
 
 ## Requisitos
 
 - Go `1.16+`
 - Conectividad a `webpay3gint.transbank.cl`
-- Variable `TRANSBANK_RUN_INTEGRATION_TESTS=1` para habilitar ejecución
+- `TRANSBANK_RUN_INTEGRATION_TESTS=1`
 
-Credenciales por defecto usadas por la suite:
-
+Credenciales/defaults usados por la suite:
 - Comercio mall: `597055555541`
 - API Secret: `579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C`
 - Base URL: `https://webpay3gint.transbank.cl/rswebpaytransaction/api/oneclick/v1.2`
+- Response URL: `https://example.com/oneclick/return`
 
-## Cómo ejecutar
+## Ejecución
 
 ### 1) Smoke tests reales (recomendado)
 
@@ -46,17 +50,23 @@ TRANSBANK_TEST_RUN_MUTATING=1 \
 go test ./oneclick -run 'HappyPath|WithFixture|RemoveWithFixture' -v -count=1
 ```
 
+### 3) Solo unit tests del SDK (sin red)
+
+```bash
+go test ./oneclick -run 'TestFlow|TestBuild|TestClientHooks|TestClassifyError|TestHooksKeepSameRequestIDAcrossRetries|TestNewOneclickService|TestStartRequestShape' -v
+```
+
 ## Matriz de tests
 
-### Smoke / comportamiento esperado sin fixtures
+### Smoke / sin fixtures
 
-- `TestIntegrationOneclickStart`: inicia inscripción real
-- `TestIntegrationOneclickFinishWithoutCustomerInteraction`: valida error esperado al confirmar sin interacción de usuario
-- `TestIntegrationOneclickRemoveUnknown`: intenta eliminar inscripción inexistente
-- `TestIntegrationOneclickAuthorizeUnknownUser`: intenta autorizar con usuario/tbk_user inexistente
-- `TestIntegrationOneclickStatusUnknownBuyOrder`: consulta estado para `buy_order` inexistente
-- `TestIntegrationOneclickRefundUnknownBuyOrder`: reversa/anula para transacción inexistente
-- `TestIntegrationOneclickCaptureUnknown`: captura para transacción inexistente
+- `TestIntegrationOneclickStart`
+- `TestIntegrationOneclickFinishWithoutCustomerInteraction`
+- `TestIntegrationOneclickRemoveUnknown`
+- `TestIntegrationOneclickAuthorizeUnknownUser`
+- `TestIntegrationOneclickStatusUnknownBuyOrder`
+- `TestIntegrationOneclickRefundUnknownBuyOrder`
+- `TestIntegrationOneclickCaptureUnknown`
 
 ### Con fixtures (opcionales)
 
@@ -67,10 +77,13 @@ go test ./oneclick -run 'HappyPath|WithFixture|RemoveWithFixture' -v -count=1
 
 ## Variables de entorno
 
-### Habilitación
+### Obligatorias
 
-- `TRANSBANK_RUN_INTEGRATION_TESTS=1` (obligatoria)
-- `TRANSBANK_TEST_RUN_MUTATING=1` (obligatoria para tests mutantes)
+- `TRANSBANK_RUN_INTEGRATION_TESTS=1`
+
+### Para mutaciones
+
+- `TRANSBANK_TEST_RUN_MUTATING=1`
 
 ### Overrides generales (opcionales)
 
@@ -85,21 +98,17 @@ go test ./oneclick -run 'HappyPath|WithFixture|RemoveWithFixture' -v -count=1
 ### Fixtures por escenario
 
 Finish exitoso:
-
 - `TRANSBANK_TEST_FINISH_TOKEN`
 
 Remove exitoso:
-
 - `TRANSBANK_TEST_REMOVE_USERNAME`
 - `TRANSBANK_TEST_REMOVE_TBK_USER`
 
 Authorize + Status + Refund happy-path:
-
 - `TRANSBANK_TEST_USERNAME`
 - `TRANSBANK_TEST_TBK_USER`
 
 Capture exitosa:
-
 - `TRANSBANK_TEST_CAPTURE_COMMERCE_CODE`
 - `TRANSBANK_TEST_CAPTURE_BUY_ORDER`
 - `TRANSBANK_TEST_CAPTURE_AUTH_CODE`
@@ -110,15 +119,19 @@ Capture exitosa:
 - Si falta `TRANSBANK_RUN_INTEGRATION_TESTS=1`, toda la suite se marca `SKIP`.
 - Si faltan fixtures de un escenario opcional, ese test se marca `SKIP`.
 - Los tests generan `buy_order`/usuarios dinámicos para reducir colisiones.
+- En escenarios `Unknown`, un error HTTP/API puede ser el resultado esperado del test.
 
-## Troubleshooting rápido
+## Troubleshooting
 
 - Error de red/DNS: valida conectividad hacia `webpay3gint.transbank.cl`.
-- Errores 4xx/5xx esperados en tests `Unknown`: el test puede pasar con error de API porque ese es el comportamiento validado.
-- Si un test mutante falla por datos: revisa fixtures y que sean recientes/válidos.
+- Timeouts: sube timeout de shell o reintenta por estabilidad de red.
+- Falla en mutantes: revisa fixtures, vigencia de token y datos de inscripción.
+- Error por credenciales: revisa `TRANSBANK_COMMERCE_CODE`/`TRANSBANK_API_SECRET` y ambiente.
 
 ## Referencias
 
 - API Oneclick: https://www.transbankdevelopers.cl/referencia/oneclick
 - Ambientes: https://www.transbankdevelopers.cl/documentacion/como_empezar#ambientes
+- Guía rápida: `INTEGRATION_TESTS_QUICK_REF.md`
+- Guía completa: `INTEGRATION_TESTS_COMPLETE.md`
 - README del SDK: `README.md`
