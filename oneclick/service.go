@@ -24,6 +24,13 @@ const (
 	maxInstallmentsNumber      = 99
 )
 
+type requestContextKey string
+
+const (
+	requestIDContextKey         requestContextKey = "oneclick_request_id"
+	operationContextOverrideKey requestContextKey = "oneclick_operation_override"
+)
+
 // Client is the raw Oneclick API client (1:1 with Transbank endpoints).
 type Client struct {
 	cfg      Config
@@ -93,7 +100,7 @@ func newOneclickServiceWithBaseURL(environment Environment, commerceCode, apiSec
 	cfg.Environment = environment
 	cfg.CommerceCode = strings.TrimSpace(commerceCode)
 	cfg.APISecret = strings.TrimSpace(apiSecret)
-	cfg.BaseURL = strings.TrimSpace(baseURL)
+	cfg.baseURL = strings.TrimSpace(baseURL)
 	if httpClient != nil {
 		cfg.HTTPClient = httpClient
 	}
@@ -358,9 +365,15 @@ func (c *Client) Capture(ctx context.Context, commerceCode, buyOrder, authorizat
 
 // doRequest makes an HTTP request to the Transbank API and decodes the JSON response.
 func (c *Client) doRequest(ctx context.Context, operation, method, path string, body interface{}, respTarget interface{}, tokenLength int) error {
+	operation = operationFromContext(ctx, operation)
+	requestID := requestIDFromContext(ctx)
+	if requestID == "" {
+		requestID = c.nextRequestID()
+	}
+
 	if !c.breaker.allow() {
 		err := NewTransportError("circuit breaker is open", true, nil)
-		c.callOnError(ctx, c.nextRequestID(), operation, method, path, 0, 0, 0, true, 0, err)
+		c.callOnError(ctx, requestID, operation, method, path, 0, 0, 0, true, 0, err)
 		return err
 	}
 
@@ -368,7 +381,6 @@ func (c *Client) doRequest(ctx context.Context, operation, method, path string, 
 
 	for attempt := 1; attempt <= c.cfg.RetryPolicy.MaxAttempts; attempt++ {
 		startedAt := c.cfg.Clock.Now()
-		requestID := c.nextRequestID()
 
 		c.callBeforeRequest(ctx, RequestEvent{
 			RequestID:   requestID,
@@ -488,7 +500,7 @@ func (c *Client) doRequestRaw(ctx context.Context, operation, method, path strin
 
 // buildRequest constructs an HTTP request with proper headers and authentication.
 func (c *Client) buildRequest(ctx context.Context, method, path string, body interface{}) (*http.Request, error) {
-	requestURL := c.cfg.BaseURL + path
+	requestURL := c.cfg.baseURL + path
 	var reqBody io.Reader
 
 	if body != nil {
@@ -568,6 +580,46 @@ func (c *Client) isStatusRetryable(statusCode int) bool {
 func (c *Client) nextRequestID() string {
 	n := atomic.AddUint64(&c.requestN, 1)
 	return fmt.Sprintf("oc_%d_%d", c.cfg.Clock.Now().UnixNano(), n)
+}
+
+func requestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(requestIDContextKey).(string)
+	return strings.TrimSpace(value)
+}
+
+func operationFromContext(ctx context.Context, fallback string) string {
+	if ctx == nil {
+		return fallback
+	}
+	value, _ := ctx.Value(operationContextOverrideKey).(string)
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func withRequestMeta(ctx context.Context, requestID, operation string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID != "" {
+		ctx = context.WithValue(ctx, requestIDContextKey, requestID)
+	}
+	ctx = context.WithValue(ctx, operationContextOverrideKey, strings.TrimSpace(operation))
+	return ctx
+}
+
+func (c *Client) contextWithRequestMeta(ctx context.Context, operation string) context.Context {
+	requestID := requestIDFromContext(ctx)
+	if requestID == "" {
+		requestID = c.nextRequestID()
+	}
+	return withRequestMeta(ctx, requestID, operation)
 }
 
 func (c *Client) callBeforeRequest(ctx context.Context, event RequestEvent) {

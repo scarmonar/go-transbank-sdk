@@ -2,9 +2,7 @@ package oneclick
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -82,6 +80,22 @@ type noopLogger struct{}
 func (noopLogger) Printf(string, ...interface{}) {}
 
 // Hooks provides observability lifecycle callbacks.
+// Each outbound API request triggers:
+// 1) BeforeRequest
+// 2) AfterRequest on success OR OnError on failure.
+//
+// Operation values emitted include:
+// - start_inscription
+// - confirm_inscription
+// - delete_inscription
+// - authorize_transaction
+// - transaction_status
+// - refund_transaction
+// - capture_transaction
+// - flow_authorize_charge (FlowService.AuthorizeCharge)
+// - flow_reverse_charge (FlowService.ReverseCharge)
+//
+// request_id is stable per operation and reused across retries.
 type Hooks struct {
 	BeforeRequest func(ctx context.Context, event RequestEvent)
 	AfterRequest  func(ctx context.Context, event ResponseEvent)
@@ -130,7 +144,7 @@ type Config struct {
 	Environment    Environment
 	CommerceCode   string
 	APISecret      string
-	BaseURL        string
+	baseURL        string
 	HTTPClient     *http.Client
 	Timeout        time.Duration
 	RetryPolicy    RetryPolicy
@@ -175,14 +189,13 @@ func (c *Config) Validate() error {
 
 	c.CommerceCode = strings.TrimSpace(c.CommerceCode)
 	c.APISecret = strings.TrimSpace(c.APISecret)
-	c.BaseURL = strings.TrimSpace(c.BaseURL)
 
 	environment, err := resolveEnvironment(c.Environment)
 	if err != nil {
 		return NewValidationError("invalid environment", err)
 	}
 
-	autodetected, err := autodetectEnvironment(environment, c.CommerceCode, c.APISecret, c.BaseURL)
+	autodetected, err := autodetectEnvironment(environment, c.CommerceCode, c.APISecret)
 	if err != nil {
 		return NewValidationError("could not autodetect environment", err)
 	}
@@ -200,13 +213,13 @@ func (c *Config) Validate() error {
 		return NewValidationError("invalid API secret", ErrInvalidAPISecret)
 	}
 
-	if c.BaseURL == "" {
-		c.BaseURL = baseURLForEnvironment(c.Environment)
+	if c.baseURL == "" {
+		c.baseURL = baseURLForEnvironment(c.Environment)
 	}
-	if err := validateBaseURL(c.BaseURL); err != nil {
+	if err := validateBaseURL(c.baseURL); err != nil {
 		return NewValidationError("invalid base URL", err)
 	}
-	c.BaseURL = strings.TrimSuffix(c.BaseURL, "/")
+	c.baseURL = strings.TrimSuffix(c.baseURL, "/")
 
 	if c.Timeout <= 0 {
 		c.Timeout = defaultHTTPTimeout
@@ -270,23 +283,9 @@ func resolveEnvironment(environment Environment) (Environment, error) {
 	return environment, nil
 }
 
-func autodetectEnvironment(explicit Environment, commerceCode, apiSecret, baseURL string) (Environment, error) {
+func autodetectEnvironment(explicit Environment, commerceCode, apiSecret string) (Environment, error) {
 	if explicit.IsValid() {
 		return explicit, nil
-	}
-
-	if baseURL != "" {
-		u, err := url.Parse(baseURL)
-		if err != nil {
-			return "", fmt.Errorf("parse base URL: %w", err)
-		}
-		host := strings.ToLower(u.Host)
-		switch {
-		case strings.Contains(host, "webpay3gint.transbank.cl"):
-			return EnvironmentIntegration, nil
-		case host != "":
-			return EnvironmentProduction, nil
-		}
 	}
 
 	if commerceCode == "" && apiSecret == "" {
@@ -340,14 +339,6 @@ func WithClock(clock Clock) Option {
 			return NewValidationError("clock cannot be nil", nil)
 		}
 		cfg.Clock = clock
-		return nil
-	}
-}
-
-// WithBaseURL forces a specific base URL.
-func WithBaseURL(baseURL string) Option {
-	return func(cfg *Config) error {
-		cfg.BaseURL = strings.TrimSpace(baseURL)
 		return nil
 	}
 }

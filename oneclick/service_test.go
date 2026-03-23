@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -509,5 +510,66 @@ func TestContextCancellation(t *testing.T) {
 	_, err := svc.Start(ctx, "user", "email@test.com", "https://test.com/return")
 	if err == nil || !strings.Contains(err.Error(), "context") {
 		t.Fatalf("expected context error, got: %v", err)
+	}
+}
+
+func TestHooksKeepSameRequestIDAcrossRetries(t *testing.T) {
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error_message":"temporary"}`)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(InscriptionResponse{Token: "token123", URLWebpay: "https://webpay/form"})
+	}))
+	defer server.Close()
+
+	var mu sync.Mutex
+	var beforeEvents []RequestEvent
+	var afterEvents []ResponseEvent
+
+	client := newTestClientWithOptions(t, server.URL, WithHooks(Hooks{
+		BeforeRequest: func(_ context.Context, event RequestEvent) {
+			mu.Lock()
+			beforeEvents = append(beforeEvents, event)
+			mu.Unlock()
+		},
+		AfterRequest: func(_ context.Context, event ResponseEvent) {
+			mu.Lock()
+			afterEvents = append(afterEvents, event)
+			mu.Unlock()
+		},
+	}))
+
+	_, err := client.Start(context.Background(), "user_123", "user@example.com", "https://merchant.com/return")
+	if err != nil {
+		t.Fatalf("start should succeed after retries: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(beforeEvents) != 3 {
+		t.Fatalf("expected 3 before events, got %d", len(beforeEvents))
+	}
+	if len(afterEvents) != 1 {
+		t.Fatalf("expected 1 after event, got %d", len(afterEvents))
+	}
+
+	requestID := beforeEvents[0].RequestID
+	if requestID == "" {
+		t.Fatal("expected non-empty request id")
+	}
+	for i, event := range beforeEvents {
+		if event.RequestID != requestID {
+			t.Fatalf("attempt %d has mismatched request id: %s vs %s", i+1, event.RequestID, requestID)
+		}
+		if event.Attempt != i+1 {
+			t.Fatalf("unexpected attempt value at %d: %d", i+1, event.Attempt)
+		}
+	}
+	if afterEvents[0].RequestID != requestID {
+		t.Fatalf("after hook request id mismatch: %s vs %s", afterEvents[0].RequestID, requestID)
 	}
 }
